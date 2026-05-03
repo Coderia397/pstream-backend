@@ -1,19 +1,30 @@
 FROM node:20-slim
 
-# Create app directory
+# yt-dlp-exec requires Python + yt-dlp binary at install time
+# ffmpeg is needed for merging audio/video streams if ever used
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    ffmpeg \
+    curl \
+    ca-certificates \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && pip3 install --no-cache-dir --break-system-packages yt-dlp \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /usr/src/app
 
-# Install app dependencies
+# Install Node dependencies
 COPY package*.json ./
 RUN npm install
 
-# Bundle app source
+# Bundle source
 COPY . .
 
-# Hugging Face Spaces dynamically assigns a port, but 7860 is the default
 EXPOSE 7860
-
-# Override the port with 7860 for HF compatibility
 ENV PORT=7860
+# Tell yt-dlp-exec to use the pip-installed binary (always latest)
+ENV YT_DLP_PATH=/usr/local/bin/yt-dlp
 
 CMD [ "node", "index.js" ]
