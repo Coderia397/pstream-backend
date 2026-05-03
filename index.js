@@ -13,6 +13,8 @@ import { USER_AGENTS, getRandomUA } from './utils/constants.js';
 import Redis from 'ioredis';
 import { recordProviderError, recordProviderSuccess, getAllProviderHealth, canonicalProviderId } from './services/providerHealth.js';
 import { getTorrentSources, streamTorrent, activeMap as torrentPool } from './services/torrent.js';
+import { resolveTrailerId, getTrailerCacheStats } from './services/trailer.js';
+
 dotenv.config();
 // BUILD: 2026-04-16T06:50Z � SuperEmbed Stage1A, proxy?gigaAxios, raceExtractors v14.1
 
@@ -1541,7 +1543,6 @@ app.get('/api/torrent/stream', async (req, res) => {
     // Auth: accept token from query param (video element can't send Authorization header)
     if (!token) return res.status(401).json({ error: 'token required' });
     try {
-        const jwt = require('jsonwebtoken');
         jwt.verify(token, process.env.JWT_SECRET || 'pstream_secret_key_change_in_prod');
     } catch {
         return res.status(401).json({ error: 'invalid or expired token' });
@@ -1634,6 +1635,27 @@ app.get('/api/torrent/status', authenticateToken, (req, res) => {
     });
 });
 
+
+// ── /trailer/resolve ─────────────────────────────────────────────────────────
+// Given a movie title + year, searches YouTube via yt-dlp (4K first, official
+// trailer fallback) and returns the best matching video ID.
+// Stream delivery is the frontend's job (Piped CDN) — we only resolve the ID.
+app.get('/trailer/resolve', async (req, res) => {
+    const { title, year, type = 'movie', tmdbIds } = req.query;
+    if (!title) return res.status(400).json({ error: 'title is required' });
+
+    const ids = tmdbIds ? String(tmdbIds).split(',').filter(Boolean) : [];
+    try {
+        const result = await resolveTrailerId(
+            String(title), String(year || ''), String(type), ids
+        );
+        res.json(result);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/trailer/cache', (_req, res) => res.json(getTrailerCacheStats()));
 
 app.listen(PORT, () => {
     console.log(`[Engine] Online on port ${PORT}`);
