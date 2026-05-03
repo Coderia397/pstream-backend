@@ -1657,6 +1657,82 @@ app.get('/trailer/resolve', async (req, res) => {
 
 app.get('/trailer/cache', (_req, res) => res.json(getTrailerCacheStats()));
 
+// ── /trailer/stream ───────────────────────────────────────────────────────────
+// Proxies the Piped /streams/{videoId} call server-side.
+// The Piped API blocks CORS for arbitrary browser origins — calling from
+// the backend has no such restriction. The returned DASH/HLS URLs point to
+// pipedproxy CDN which DOES have open CORS (Piped's own web app needs it).
+const PIPED_INSTANCES = [
+    'https://pipedapi.kavin.rocks',
+    'https://api.piped.projectsegfau.lt',
+    'https://pipedapi.adminforge.de',
+    'https://pipedapi.in.projectsegfau.lt',
+    'https://api.piped.privacydev.net',
+];
+
+const _pipedStreamCache = new Map(); // videoId → { ts, data }
+const PIPED_CACHE_TTL   = 20 * 60 * 1000; // 20 min (DASH URLs expire ~30 min)
+
+app.get('/trailer/stream', async (req, res) => {
+    const { videoId } = req.query;
+    if (!videoId) return res.status(400).json({ error: 'videoId is required' });
+
+    // Cache check
+    const hit = _pipedStreamCache.get(videoId);
+    if (hit && Date.now() - hit.ts < PIPED_CACHE_TTL) {
+        return res.json(hit.data);
+    }
+
+    let lastErr = null;
+    for (const base of PIPED_INSTANCES) {
+        try {
+            const response = await gigaAxios.get(`${base}/streams/${videoId}`, {
+                timeout: 10000,
+                headers: { Accept: 'application/json', 'User-Agent': 'Mozilla/5.0' },
+            });
+            const data = response.data;
+
+            // Piped DASH manifest — set for all regular (non-livestream) videos
+            const dash = data.dash || null;
+            // Piped HLS manifest — set only for livestreams
+            const hls  = data.hls  || null;
+
+            if (!dash && !hls) {
+                lastErr = new Error('Piped returned no playable manifest');
+                continue;
+            }
+
+            // Subtitle — prefer English VTT
+            const subtitles = Array.isArray(data.subtitles) ? data.subtitles : [];
+            const sub = subtitles.find(s =>
+                (s.code === 'en' || s.code === 'en-US') &&
+                (s.mimeType === 'text/vtt' || s.mimeType === 'application/ttml+xml')
+            );
+
+            const result = {
+                streamUrl:  dash || hls,
+                isDASH:     !!dash,
+                isHLS:      !dash && !!hls,
+                subtitleUrl: sub?.url || null,
+                videoId,
+                proxyUrl:   data.proxyUrl || null,
+                instance:   base,
+            };
+
+            _pipedStreamCache.set(videoId, { ts: Date.now(), data: result });
+            return res.json(result);
+
+        } catch (e) {
+            lastErr = e;
+            console.warn(`[Piped] ${base} failed for ${videoId}: ${e.message}`);
+        }
+    }
+
+    res.status(502).json({ error: `All Piped instances failed: ${lastErr?.message}` });
+});
+
+
+
 app.listen(PORT, () => {
     console.log(`[Engine] Online on port ${PORT}`);
 });
