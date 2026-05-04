@@ -6,6 +6,8 @@ import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import os from 'os';
+import { spawn } from 'child_process';
+
 import { createChallenge, verifyChallenge } from './utils/challenge.js';
 import { getProfile, updateProfile, deleteProfile } from './utils/db.js';
 import { resolveStreaming, diagnoseProviders } from './resolver.js';
@@ -1731,8 +1733,88 @@ app.get('/trailer/stream', async (req, res) => {
     res.status(502).json({ error: `All Piped instances failed: ${lastErr?.message}` });
 });
 
+// ── /trailer/cobalt ───────────────────────────────────────────────────────────
+// Cobalt (https://cobalt.tools) handles YouTube extraction on their servers.
+// We call their API from giga backend (no CORS), they return a tunnel URL
+// the browser plays as a plain <video src> — no YouTube player, no branding.
+// Supports up to 4K. Their servers handle bot detection, not ours.
+//
+// Cobalt API v10: POST https://api.cobalt.tools/
+// Docs: https://github.com/imputnet/cobalt/blob/main/docs/api.md
 
+// Public Cobalt instances — fall through if one fails or rate-limits
+const COBALT_INSTANCES = [
+    'https://api.cobalt.tools',
+    'https://cobalt.api.lostfiles.pro',
+    'https://cobalt.katzen.cafe/api',
+];
+
+const _cobaltCache = new Map(); // videoId → { ts, url }
+const COBALT_CACHE_TTL = 30 * 60 * 1000; // 30 min
+
+app.get('/trailer/cobalt', async (req, res) => {
+    const { videoId, quality = '1080' } = req.query;
+    if (!videoId || !/^[a-zA-Z0-9_-]{8,15}$/.test(String(videoId))) {
+        return res.status(400).json({ error: 'invalid videoId' });
+    }
+
+    const vid = String(videoId);
+
+    // Cache check
+    const hit = _cobaltCache.get(vid);
+    if (hit && Date.now() - hit.ts < COBALT_CACHE_TTL) {
+        return res.json({ url: hit.url, cached: true });
+    }
+
+    const ytUrl = `https://www.youtube.com/watch?v=${vid}`;
+    // Cobalt videoQuality: '144'|'240'|'360'|'480'|'720'|'1080'|'1440'|'2160'|'max'
+    const videoQuality = ['144','240','360','480','720','1080','1440','2160','max'].includes(String(quality))
+        ? String(quality) : '1080';
+
+    let lastErr = null;
+    for (const base of COBALT_INSTANCES) {
+        try {
+            const cobaltRes = await gigaAxios.post(base, {
+                url: ytUrl,
+                videoQuality,
+                downloadMode: 'auto',
+                youtubeVideoCodec: 'h264', // h264 = mp4, broadest browser support
+                filenameStyle: 'basic',
+            }, {
+                timeout: 15000,
+                headers: {
+                    'Accept':       'application/json',
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            const { status, url } = cobaltRes.data;
+
+            // Cobalt statuses: 'tunnel' | 'stream' | 'redirect' | 'picker' | 'error'
+            if ((status === 'tunnel' || status === 'stream' || status === 'redirect') && url) {
+                _cobaltCache.set(vid, { ts: Date.now(), url });
+                console.log(`[Cobalt] ✅ ${vid} → ${status} via ${base}`);
+                return res.json({ url, status, quality: videoQuality });
+            }
+
+            if (status === 'error') {
+                lastErr = new Error(cobaltRes.data?.error?.code || 'cobalt error');
+                continue;
+            }
+
+        } catch (e) {
+            lastErr = e;
+            console.warn(`[Cobalt] ${base} failed: ${e.message}`);
+        }
+    }
+
+    res.status(502).json({ error: `Cobalt unavailable: ${lastErr?.message}` });
+});
 
 app.listen(PORT, () => {
     console.log(`[Engine] Online on port ${PORT}`);
 });
+
+
+// yt-dlp + ffmpeg pipe: best quality available (up to 4K) → merged mp4 stream.
+
