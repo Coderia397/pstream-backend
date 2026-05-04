@@ -1734,23 +1734,57 @@ app.get('/trailer/stream', async (req, res) => {
 });
 
 // ── /trailer/cobalt ───────────────────────────────────────────────────────────
-// Cobalt (https://cobalt.tools) handles YouTube extraction on their servers.
-// We call their API from giga backend (no CORS), they return a tunnel URL
-// the browser plays as a plain <video src> — no YouTube player, no branding.
-// Supports up to 4K. Their servers handle bot detection, not ours.
-//
-// Cobalt API v10: POST https://api.cobalt.tools/
-// Docs: https://github.com/imputnet/cobalt/blob/main/docs/api.md
+// Cobalt handles YouTube extraction on their servers (no HF IP ban issues).
+// Key fix: use a PLAIN axios instance — gigaAxios has browser nav headers
+// (Sec-Fetch-Mode:navigate, Accept:text/html) that break JSON API calls.
 
-// Public Cobalt instances — fall through if one fails or rate-limits
+// _cobaltAxios: clean axios with no browser nav headers (gigaAxios would break JSON API calls)
+const _cobaltAxios = axios.create({ timeout: 18000 });
+
+
+// Cobalt v10 API format — instances in priority order (remove dead ones fast)
 const COBALT_INSTANCES = [
-    'https://api.cobalt.tools',
-    'https://cobalt.api.lostfiles.pro',
-    'https://cobalt.katzen.cafe/api',
+    { base: 'https://api.cobalt.tools',           api: '/' },
+    { base: 'https://cobalt.api.lostfiles.pro',   api: '/' },
+    { base: 'https://cobalt.ggtyler.dev',          api: '/' },
+    { base: 'https://cob.janw.xyz',                api: '/' },
+    // Older v7/v8 instances (different endpoint + field names)
+    { base: 'https://co.wuk.sh',                   api: '/api/json', legacy: true },
+];
+
+// Invidious instances for 720p fallback (these proxy streams with CORS)
+const INVIDIOUS_INSTANCES = [
+    'https://invidious.jing.rocks',
+    'https://vid.priv.au',
+    'https://invidious.privacyredirect.com',
 ];
 
 const _cobaltCache = new Map(); // videoId → { ts, url }
-const COBALT_CACHE_TTL = 30 * 60 * 1000; // 30 min
+const COBALT_CACHE_TTL = 25 * 60 * 1000; // 25 min
+
+async function tryInvidiousFallback(videoId) {
+    for (const base of INVIDIOUS_INSTANCES) {
+        try {
+            const { data } = await _cobaltAxios.get(
+                `${base}/api/v1/videos/${videoId}?fields=formatStreams`,
+                { headers: { Accept: 'application/json' } }
+            );
+            // formatStreams = combined video+audio (up to 720p), proxied through Invidious
+            const streams = data.formatStreams || [];
+            // Prefer 720p, then 480p, then whatever's available
+            const best = streams.sort((a, b) =>
+                parseInt(b.resolution) - parseInt(a.resolution)
+            )[0];
+            if (best?.url) {
+                console.log(`[Invidious] ✅ ${videoId} → ${best.qualityLabel} via ${base}`);
+                return { url: best.url, quality: best.qualityLabel, source: 'invidious' };
+            }
+        } catch (e) {
+            console.warn(`[Invidious] ${base} failed: ${e.message}`);
+        }
+    }
+    return null;
+}
 
 app.get('/trailer/cobalt', async (req, res) => {
     const { videoId, quality = '1080' } = req.query;
@@ -1767,48 +1801,54 @@ app.get('/trailer/cobalt', async (req, res) => {
     }
 
     const ytUrl = `https://www.youtube.com/watch?v=${vid}`;
-    // Cobalt videoQuality: '144'|'240'|'360'|'480'|'720'|'1080'|'1440'|'2160'|'max'
-    const videoQuality = ['144','240','360','480','720','1080','1440','2160','max'].includes(String(quality))
-        ? String(quality) : '1080';
+    const videoQuality = ['144','240','360','480','720','1080','1440','2160','max']
+        .includes(String(quality)) ? String(quality) : '1080';
 
-    let lastErr = null;
-    for (const base of COBALT_INSTANCES) {
+    const errors = [];
+
+    // ── Try Cobalt instances ──────────────────────────────────────────────────
+    for (const { base, api, legacy } of COBALT_INSTANCES) {
         try {
-            const cobaltRes = await gigaAxios.post(base, {
-                url: ytUrl,
-                videoQuality,
-                downloadMode: 'auto',
-                youtubeVideoCodec: 'h264', // h264 = mp4, broadest browser support
-                filenameStyle: 'basic',
-            }, {
-                timeout: 15000,
-                headers: {
-                    'Accept':       'application/json',
-                    'Content-Type': 'application/json',
-                },
+            const body = legacy
+                ? { url: ytUrl, vQuality: videoQuality, vCodec: 'h264', isAudioOnly: false, filenamePattern: 'basic' }
+                : { url: ytUrl, videoQuality, downloadMode: 'auto', youtubeVideoCodec: 'h264', filenameStyle: 'basic' };
+
+            const cobaltRes = await _cobaltAxios.post(`${base}${api}`, body, {
+                headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
             });
 
-            const { status, url } = cobaltRes.data;
+            const d = cobaltRes.data;
+            const status = d.status;
+            const url    = d.url;
 
-            // Cobalt statuses: 'tunnel' | 'stream' | 'redirect' | 'picker' | 'error'
             if ((status === 'tunnel' || status === 'stream' || status === 'redirect') && url) {
                 _cobaltCache.set(vid, { ts: Date.now(), url });
-                console.log(`[Cobalt] ✅ ${vid} → ${status} via ${base}`);
-                return res.json({ url, status, quality: videoQuality });
+                console.log(`[Cobalt] ✅ ${vid} → ${status} (${videoQuality}p) via ${base}`);
+                return res.json({ url, status, quality: videoQuality, source: 'cobalt' });
             }
 
-            if (status === 'error') {
-                lastErr = new Error(cobaltRes.data?.error?.code || 'cobalt error');
-                continue;
-            }
+            const errMsg = d?.error?.code || d?.text || `unexpected status: ${status}`;
+            errors.push(`${base}: ${errMsg}`);
+            console.warn(`[Cobalt] ${base} returned error status: ${errMsg}`);
 
         } catch (e) {
-            lastErr = e;
-            console.warn(`[Cobalt] ${base} failed: ${e.message}`);
+            const detail = e.response
+                ? `HTTP ${e.response.status}: ${JSON.stringify(e.response.data).slice(0, 120)}`
+                : e.message;
+            errors.push(`${base}: ${detail}`);
+            console.warn(`[Cobalt] ${base} failed: ${detail}`);
         }
     }
 
-    res.status(502).json({ error: `Cobalt unavailable: ${lastErr?.message}` });
+    // ── Invidious fallback (720p proxied, reliable CORS) ─────────────────────
+    const inv = await tryInvidiousFallback(vid);
+    if (inv) {
+        _cobaltCache.set(vid, { ts: Date.now(), url: inv.url });
+        return res.json({ url: inv.url, quality: inv.quality, source: 'invidious' });
+    }
+
+    console.error(`[Cobalt] All sources failed for ${vid}:\n${errors.join('\n')}`);
+    res.status(502).json({ error: 'All stream sources failed', detail: errors });
 });
 
 app.listen(PORT, () => {
@@ -1816,5 +1856,6 @@ app.listen(PORT, () => {
 });
 
 
-// yt-dlp + ffmpeg pipe: best quality available (up to 4K) → merged mp4 stream.
+// Cobalt (https://cobalt.tools) handles YouTube extraction on their servers.
+// We call their API from giga backend (no CORS), they return a tunnel URL
 
