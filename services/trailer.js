@@ -134,32 +134,38 @@ export async function resolveTrailerId(title, year = '', type = 'movie', tmdbIds
     const suffix = type === 'tv' ? 'official trailer season 1' : 'official trailer';
     const yearStr = year ? ` ${year}` : '';
 
-    // Pass 1: 4K search
-    // Pass 2: official trailer search
-    // Run both in parallel
-    const [pass1, pass2] = await Promise.allSettled([
-        ytSearch(`${title}${yearStr} 4K trailer`, 5),
-        ytSearch(`${title}${yearStr} ${suffix}`,  5),
-    ]);
+    // Pass 1+2: yt-dlp YouTube search (4K first, official trailer fallback)
+    // These may fail on HF datacenter IPs — caught gracefully below
+    let pass1 = { status: 'rejected', value: [] };
+    let pass2 = { status: 'rejected', value: [] };
+    try {
+        [pass1, pass2] = await Promise.allSettled([
+            ytSearch(`${title}${yearStr} 4K trailer`, 5),
+            ytSearch(`${title}${yearStr} ${suffix}`,  5),
+        ]);
+    } catch {
+        // yt-dlp search failed entirely — will rely on TMDB IDs
+    }
 
     const candidates = [
         ...(pass1.status === 'fulfilled' ? pass1.value.map(e => ({ ...e, source: '4k_search' })) : []),
         ...(pass2.status === 'fulfilled' ? pass2.value.map(e => ({ ...e, source: 'official_search' })) : []),
     ];
 
-    // Pass 3: TMDB-sourced IDs (stub entries for scoring — no metadata available)
+    // Pass 3: TMDB-sourced IDs — reliable fallback when yt-dlp search is blocked
     for (const id of tmdbIds) {
         if (!candidates.find(c => c.id === id)) {
             candidates.push({ id, title: `${title} trailer`, duration: 120, view_count: 0, source: 'tmdb' });
         }
     }
 
+    // If yt-dlp search was blocked AND no TMDB IDs, we genuinely can't resolve
     if (candidates.length === 0) {
-        throw new Error(`No trailer candidates found for "${title}"`);
+        throw new Error(`No trailer candidates found for "${title}" (yt-dlp blocked, no TMDB IDs provided)`);
     }
 
     // Deduplicate by video ID and pick the best score
-    const seen  = new Set();
+    const seen   = new Set();
     const scored = [];
     for (const c of candidates) {
         if (!c.id || seen.has(c.id)) continue;
@@ -170,19 +176,19 @@ export async function resolveTrailerId(title, year = '', type = 'movie', tmdbIds
     scored.sort((a, b) => b.score - a.score);
     const best = scored[0];
 
-    if (best.score < -100) throw new Error(`No credible trailer found (best score ${best.score})`);
-
     const result = {
         videoId: best.id,
         title:   best.title,
         score:   best.score,
         source:  best.source,
         year,
+        ytdlpBlocked: candidates.every(c => c.source === 'tmdb'),
     };
 
     cacheSet(cacheKey, result);
     return result;
 }
+
 
 export function getTrailerCacheStats() {
     return { size: _cache.size, ttl_h: CACHE_TTL / 3_600_000 };
