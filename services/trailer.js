@@ -159,9 +159,14 @@ export async function resolveTrailerId(title, year = '', type = 'movie', tmdbIds
         }
     }
 
-    // If yt-dlp search was blocked AND no TMDB IDs, we genuinely can't resolve
+    // If yt-dlp search was blocked AND no TMDB IDs, return a null result instead of throwing
     if (candidates.length === 0) {
-        throw new Error(`No trailer candidates found for "${title}" (yt-dlp blocked, no TMDB IDs provided)`);
+        return {
+            videoId: null,
+            error: `No trailer candidates found for "${title}"`,
+            ytdlpBlocked: true,
+            source: 'none'
+        };
     }
 
     // Deduplicate by video ID and pick the best score
