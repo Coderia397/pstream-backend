@@ -291,15 +291,9 @@ function collectExtractorResults(extractors, timeoutMs) {
                     successes.push(diagResult);
                     console.log(`[Race] ✅ ${diagResult._providerName} in ${diagResult._elapsedMs}ms → ${srcCount} raw source(s)`);
 
-                    if (!graceTimer) {
-                        // Adaptive grace: rich providers (Vyla 7+ srcs) exit fast.
-                        // Thin providers wait a bit for backups to land.
-                        const grace = srcCount >= SOURCE_THRESHOLD_FOR_EARLY_EXIT
-                            ? GRACE_SHORT_MS
-                            : GRACE_LONG_MS;
-                        console.log(`[Race] ⏳ Grace window: ${grace}ms (${srcCount} src${srcCount !== 1 ? 's' : ''} from first winner)`);
-                        graceTimer = setTimeout(() => finalize(), grace);
-                    }
+                    // Priority Race: Exit immediately on first success
+                    console.log(`[Race] ⚡ Priority exit triggered by first winner`);
+                    finalize();
                 }
 
                 if (settled === total) finalize();
