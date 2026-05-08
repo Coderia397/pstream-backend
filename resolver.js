@@ -101,6 +101,21 @@ function deduplicateSourcesByCdn(sources) {
     });
 }
 
+// ── Bad CDN Blacklist ──────────────────────────────────────────────────────
+const BAD_CDN_HOSTS = [
+    'automatedrevenuehub.site', // Known to serve HTML ad payloads instead of m3u8
+    'tmstrd.justhd.tv'          // Frequently returns Cloudflare/HTML instead of video chunks
+];
+
+function isBadCdn(url = '') {
+    try { 
+        const host = new URL(url).hostname.toLowerCase();
+        return BAD_CDN_HOSTS.some(bad => host.includes(bad));
+    } catch (_) { 
+        return false; 
+    }
+}
+
 // ── Smart source merger & sorter ───────────────────────────────────────────
 function mergeAndRankSources(results) {
     const urlSeen    = new Set();
@@ -111,6 +126,10 @@ function mergeAndRankSources(results) {
         for (const src of (result.sources || [])) {
             if (src.isEmbed) continue;
             if (!src.url)    continue;
+            if (isBadCdn(src.url)) {
+                console.log(`[Resolver] Dropped blacklisted CDN source: ${src.url}`);
+                continue;
+            }
             if (urlSeen.has(src.url)) continue;
             urlSeen.add(src.url);
             allSources.push({
