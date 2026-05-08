@@ -692,9 +692,9 @@ app.get('/proxy/stream', async (req, res) => {
         try {
             response = await activeAxios.get(finalFetchUrl, activeAxiosOptions);
         } catch (proxyErr) {
-            // Failover: 407 (Auth), 403 (Forbidden/Blocked), ECONNREFUSED (Dead Proxy), or 503 (Overloaded)
+            // Failover: 407 (Auth), 403 (Forbidden/Blocked), ECONNREFUSED (Dead Proxy), or 5xx (Server/Proxy Errors)
             const status = proxyErr.response?.status;
-            if (status === 407 || status === 403 || status === 429 || status === 503 || proxyErr.code === 'ECONNREFUSED' || (proxyErr.message || '').includes('407')) {
+            if (status === 407 || status === 403 || status === 429 || status >= 500 || proxyErr.code === 'ECONNREFUSED' || (proxyErr.message || '').includes('407')) {
                 console.warn(`[Proxy Failover] Proxy rejected/failed (${status || proxyErr.code}). Retrying direct...`);
                 try {
                     response = await gigaAxios.get(finalFetchUrl, { ...activeAxiosOptions, httpsAgent: undefined });
@@ -923,41 +923,7 @@ app.get('/api/introdb/subtitles', async (req, res) => {
     }
 });
 
-// YouTube Caption Proxy — bypasses browser CORS on timedtext API
-app.get('/api/youtube/captions', async (req, res) => {
-    const { videoId, lang = 'en', tlang, kind, name } = req.query;
-    if (!videoId) return res.status(400).json({ error: 'videoId required' });
-    try {
-        const params = new URLSearchParams({ v: String(videoId), lang: String(lang), fmt: 'vtt' });
-        if (tlang) params.set('tlang', String(tlang));
-        // kind=asr fetches auto-generated captions (most common on trailers/informal uploads)
-        if (kind) params.set('kind', String(kind));
-        // name disambiguates between multiple tracks in the same language
-        if (name) params.set('name', String(name));
-        const url = `https://www.youtube.com/api/timedtext?${params.toString()}`;
-        // Use plain axios transport for YouTube endpoints to avoid proxy/TLS chain
-        // instability observed in HF logs for this specific host.
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': getRandomUA(),
-                'Accept-Language': 'en-US,en;q=0.9',
-                // Avoid YouTube's CONSENT redirect on EU IPs
-                'Cookie': 'CONSENT=YES+cb; YSC=; VISITOR_INFO1_LIVE=',
-            },
-            timeout: 15000,
-            responseType: 'text',
-        });
-        if (!response.data || String(response.data).trim() === '') {
-            return res.status(404).json({ error: 'No captions available for this video' });
-        }
-        res.set('Content-Type', 'text/vtt; charset=UTF-8');
-        res.set('Cache-Control', 'public, max-age=86400');
-        return res.send(response.data);
-    } catch (e) {
-        console.warn(`[YTCaptions] ${e?.response?.status || e.message} for videoId=${videoId}`);
-        return res.status(404).json({ error: 'Captions unavailable' });
-    }
-});
+
 
 const ytSearchCache = new Map();
 const YT_SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;

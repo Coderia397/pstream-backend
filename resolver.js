@@ -12,13 +12,6 @@
  *                                         VidNest (7 sources), subtitles.
  * ✅ CineSu    (cine.su)                — direct 1080p HLS, HEAD probe. ~1-2s
  *
- * ❌ VixSrc   (vixsrc.to) — DEAD AS OF 2026-04. Blocks datacenter IPs.
- * ❌ VidSrc.me — embed-only. POLICY: no embed fallbacks.
- * ❌ PrimeSrc  — embed-only. POLICY: no embed fallbacks.
- * ❌ KiraStreams — embed-only. No raw API.
- * ❌ AutoEmbed — New Relic JS gate.
- * ❌ MoviesAPI — SPA, JS-only.
- *
  * ══ POLICY ════════════════════════════════════════════════════════════════
  *
  * NO EMBED FALLBACKS. Every source must be a raw M3U8 or direct MP4/MKV URL.
@@ -60,6 +53,7 @@ import { scrapeLookMovie }    from './extractors/lookmovie.js';
 import { scrapeVyla }         from './extractors/vyla.js';
 import { scrapeCineSu }       from './extractors/cinesu.js';
 import { scrapeVdrkCaptions } from './extractors/subs_vdrk.js';
+import { scrapeVixSrc }       from './extractors/vixsrc.js';
 import { filterByHealth }     from './services/providerHealth.js';
 
 // ── Quality ranking ────────────────────────────────────────────────────────
@@ -348,6 +342,11 @@ export async function resolveStreaming(tmdbId, type, season, episode, title, yea
             id: 'vaplayer',
             name: 'VaPlayer',
             run: () => extractVaPlayer({ tmdbId, type, season, episode })
+        },
+        {
+            id: 'vixsrc',
+            name: 'VixSrc',
+            run: () => scrapeVixSrc(tmdbId, type, season, episode)
         },
         {
             id: 'vidzee',
