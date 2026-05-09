@@ -1,6 +1,6 @@
 /**
- * P-Stream Giga Engine Resolver v19.0.0
- * "CineSu + VidSrc Mirror Expansion + Source Depth"
+ * P-Stream Giga Engine Resolver v20.0.0
+ * "SmashyStream + MoviesAPI expansion"
  *
  * ══ PROVIDER STATUS (2026-05-02) ═══════════════════════════════════════════
  *
@@ -54,6 +54,8 @@ import { scrapeVyla }         from './extractors/vyla.js';
 import { scrapeCineSu }       from './extractors/cinesu.js';
 import { scrapeVdrkCaptions } from './extractors/subs_vdrk.js';
 import { scrapeVixSrc }       from './extractors/vixsrc.js';
+import { scrapeSmashyStream } from './extractors/smashystream.js';
+import { scrapeMoviesApi }    from './extractors/moviesapi.js';
 import { filterByHealth }     from './services/providerHealth.js';
 
 // ── Quality ranking ────────────────────────────────────────────────────────
@@ -384,6 +386,16 @@ export async function resolveStreaming(tmdbId, type, season, episode, title, yea
                 ? scrapeLookMovie(tmdbId, type === 'movie' ? 'movie' : 'show', season, episode, title, year)
                 : Promise.resolve({ success: false, _skipReason: 'no title provided' })
             )
+        },
+        {
+            id: 'smashystream',
+            name: 'SmashyStream',
+            run: () => scrapeSmashyStream(tmdbId, type, season, episode)
+        },
+        {
+            id: 'moviesapi',
+            name: 'MoviesAPI',
+            run: () => scrapeMoviesApi(tmdbId, type, season, episode)
         },
     ];
 
