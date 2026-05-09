@@ -120,26 +120,29 @@ export async function getTorrentSources(imdbId, type, season, episode, redisClie
     // Parse and sort by seeders
     const parsed = streams
         .map(s => {
-            // Torrentio stream name format: "Quality\nSize 👤Seeders"
-            const lines    = (s.name || '').split('\n');
-            const nameLine = lines[0] || '';
-            const infoLine = lines[1] || '';
+            // Torrentio stream format:
+            // name: "Torrentio\n4k HDR"
+            // title: "The.Dark.Knight.2008...\n👤 79 💾 21.57 GB ⚙️ ThePirateBay"
+            const nameLine = s.name || '';
+            const titleLine = s.title || '';
 
-            const seedMatch = infoLine.match(/👤\s*(\d+)/);
+            const seedMatch = titleLine.match(/👤\s*(\d+)/);
             const seeders   = seedMatch ? parseInt(seedMatch[1]) : 0;
+
+            const filenameMatch = titleLine.split('\n')[0];
 
             // Extract quality from name
             let quality = 'unknown';
-            if (/4k|2160p/i.test(nameLine))  quality = '4k';
-            else if (/1080p/i.test(nameLine)) quality = '1080p';
-            else if (/720p/i.test(nameLine))  quality = '720p';
-            else if (/480p/i.test(nameLine))  quality = '480p';
+            if (/4k|2160p/i.test(nameLine) || /4k|2160p/i.test(filenameMatch))  quality = '4k';
+            else if (/1080p/i.test(nameLine) || /1080p/i.test(filenameMatch)) quality = '1080p';
+            else if (/720p/i.test(nameLine) || /720p/i.test(filenameMatch))  quality = '720p';
+            else if (/480p/i.test(nameLine) || /480p/i.test(filenameMatch))  quality = '480p';
 
             return {
-                name:      nameLine.trim(),
+                name:      filenameMatch.trim(),
                 infoHash:  s.infoHash,
                 magnet:    s.infoHash
-                    ? `magnet:?xt=urn:btih:${s.infoHash}&dn=${encodeURIComponent(nameLine)}&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce`
+                    ? `magnet:?xt=urn:btih:${s.infoHash}&dn=${encodeURIComponent(filenameMatch.trim())}&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce`
                     : null,
                 seeders,
                 quality,
