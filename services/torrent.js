@@ -73,102 +73,146 @@ function cleanupIdleTorrents() {
 
 setInterval(cleanupIdleTorrents, 5 * 60 * 1000); // run every 5min
 
-// ── Torrentio: get magnet links ───────────────────────────────────────────────
+// ── Torrentio + APiBay dual-source pipeline ───────────────────────────────────
 /**
+ * Fetch magnets from BOTH Torrentio and APiBay simultaneously.
+ * Merges, deduplicates by infoHash, sorts by quality → seeders.
+ *
  * @param {string} imdbId   - e.g. "tt1375666"
  * @param {string} type     - "movie" | "series"
  * @param {number} season   - TV only
  * @param {number} episode  - TV only
- * @returns {Array<{name, infoHash, magnet, seeders, quality}>} sorted best-first
+ * @returns {Array<{name, infoHash, magnet, seeders, quality, fileIdx}>} sorted best-first
  */
 export async function getTorrentSources(imdbId, type, season, episode, redisClient = null) {
-    // Build Torrentio URL
-    let torrentioUrl;
-    if (type === 'movie' || type === 'film') {
-        torrentioUrl = `${TORRENTIO_BASE}/${TORRENTIO_OPTIONS}/stream/movie/${imdbId}.json`;
-    } else {
-        const s = parseInt(season)  || 1;
-        const e = parseInt(episode) || 1;
-        torrentioUrl = `${TORRENTIO_BASE}/${TORRENTIO_OPTIONS}/stream/series/${imdbId}:${s}:${e}.json`;
-    }
-
-    // Check Redis cache first
-    const cacheKey = `torrentio:${imdbId}:${type}:${season || ''}:${episode || ''}`;
+    const mergedKey = `torrent_merged:${imdbId}:${type}:${season || ''}:${episode || ''}`;
     if (redisClient) {
         try {
-            const cached = await redisClient.get(cacheKey);
-            if (cached) {
-                console.log(`[Torrent] Cache HIT: ${cacheKey}`);
-                return JSON.parse(cached);
-            }
+            const cached = await redisClient.get(mergedKey);
+            if (cached) { console.log(`[Torrent] Cache HIT: ${mergedKey}`); return JSON.parse(cached); }
         } catch (_) {}
     }
 
-    console.log(`[Torrent] Fetching Torrentio: ${torrentioUrl}`);
+    const [torrentioResult, apibayResult] = await Promise.allSettled([
+        fetchTorrentioSources(imdbId, type, season, episode),
+        fetchApiBaySources(imdbId, type, season, episode),
+    ]);
 
-    const resp = await axios.get(torrentioUrl, {
-        timeout: 10000,
-        headers: { 'Accept': 'application/json' },
+    const torrentio = torrentioResult.status === 'fulfilled' ? torrentioResult.value : [];
+    const apibay    = apibayResult.status    === 'fulfilled' ? apibayResult.value    : [];
+    console.log(`[Torrent] Torrentio=${torrentio.length} APiBay=${apibay.length}`);
+
+    // Merge — Torrentio entries have fileIdx so they take priority over APiBay dupes
+    const seen    = new Set();
+    const merged  = [];
+    const qRank   = { '4k': 0, '1080p': 1, '720p': 2, '480p': 3, 'unknown': 4 };
+
+    for (const src of [...torrentio, ...apibay]) {
+        const h = (src.infoHash || '').toLowerCase();
+        if (!h || seen.has(h)) continue;
+        seen.add(h);
+        merged.push(src);
+    }
+
+    merged.sort((a, b) => {
+        const qa = qRank[a.quality] ?? 5, qb = qRank[b.quality] ?? 5;
+        if (qa !== qb) return qa - qb;
+        return b.seeders - a.seeders;
     });
 
-    const streams = resp.data?.streams || [];
-    if (!streams.length) {
-        console.warn('[Torrent] Torrentio returned no streams');
-        return [];
+    console.log(`[Torrent] ${merged.length} unique sources. Best: ${merged[0]?.quality} @ ${merged[0]?.seeders} seeders`);
+
+    if (redisClient && merged.length) {
+        try { await redisClient.set(mergedKey, JSON.stringify(merged), 'EX', 43200); } catch (_) {}
     }
-
-    // Parse and sort by seeders
-    const parsed = streams
-        .map(s => {
-            // Torrentio stream format:
-            // name: "Torrentio\n4k HDR"
-            // title: "The.Dark.Knight.2008...\n👤 79 💾 21.57 GB ⚙️ ThePirateBay"
-            const nameLine = s.name || '';
-            const titleLine = s.title || '';
-
-            const seedMatch = titleLine.match(/👤\s*(\d+)/);
-            const seeders   = seedMatch ? parseInt(seedMatch[1]) : 0;
-
-            const filenameMatch = titleLine.split('\n')[0];
-
-            // Extract quality from name
-            let quality = 'unknown';
-            if (/4k|2160p/i.test(nameLine) || /4k|2160p/i.test(filenameMatch))  quality = '4k';
-            else if (/1080p/i.test(nameLine) || /1080p/i.test(filenameMatch)) quality = '1080p';
-            else if (/720p/i.test(nameLine) || /720p/i.test(filenameMatch))  quality = '720p';
-            else if (/480p/i.test(nameLine) || /480p/i.test(filenameMatch))  quality = '480p';
-
-            return {
-                name:      filenameMatch.trim(),
-                infoHash:  s.infoHash,
-                magnet:    s.infoHash
-                    ? `magnet:?xt=urn:btih:${s.infoHash}&dn=${encodeURIComponent(filenameMatch.trim())}&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce`
-                    : null,
-                seeders,
-                quality,
-                fileIdx:   s.fileIdx ?? null,
-            };
-        })
-        .filter(s => s.infoHash) // must have infoHash
-        .sort((a, b) => {
-            // Sort: quality first, then seeders
-            const qRank = { '4k': 0, '1080p': 1, '720p': 2, '480p': 3, 'unknown': 4 };
-            const qa    = qRank[a.quality] ?? 5;
-            const qb    = qRank[b.quality] ?? 5;
-            if (qa !== qb) return qa - qb;
-            return b.seeders - a.seeders;
-        });
-
-    // Cache in Redis for 24h
-    if (redisClient && parsed.length) {
-        try {
-            await redisClient.set(cacheKey, JSON.stringify(parsed), 'EX', 86400);
-        } catch (_) {}
-    }
-
-    console.log(`[Torrent] Got ${parsed.length} sources. Best: ${parsed[0]?.quality} @ ${parsed[0]?.seeders} seeders`);
-    return parsed;
+    return merged;
 }
+
+// ── Internal: fetch from Torrentio ────────────────────────────────────────────
+async function fetchTorrentioSources(imdbId, type, season, episode) {
+    let url;
+    if (type === 'movie' || type === 'film') {
+        url = `${TORRENTIO_BASE}/${TORRENTIO_OPTIONS}/stream/movie/${imdbId}.json`;
+    } else {
+        url = `${TORRENTIO_BASE}/${TORRENTIO_OPTIONS}/stream/series/${imdbId}:${parseInt(season)||1}:${parseInt(episode)||1}.json`;
+    }
+    console.log(`[Torrentio] Fetching: ${url}`);
+    const resp = await axios.get(url, { timeout: 12000, headers: { 'Accept': 'application/json' } });
+    const streams = resp.data?.streams || [];
+    if (!streams.length) { console.warn('[Torrentio] No streams'); return []; }
+
+    return streams.map(s => {
+        const nameLine  = s.name  || '';
+        const titleLine = s.title || '';
+        const seedMatch = titleLine.match(/\ud83d\udc64\s*(\d+)/);
+        const seeders   = seedMatch ? parseInt(seedMatch[1]) : 0;
+        const filename  = titleLine.split('\n')[0];
+
+        let quality = 'unknown';
+        if (/4k|2160p/i.test(nameLine) || /4k|2160p/i.test(filename)) quality = '4k';
+        else if (/1080p/i.test(nameLine) || /1080p/i.test(filename))  quality = '1080p';
+        else if (/720p/i.test(nameLine)  || /720p/i.test(filename))   quality = '720p';
+        else if (/480p/i.test(nameLine)  || /480p/i.test(filename))   quality = '480p';
+
+        const TRACKERS = 'tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&tr=udp%3A%2F%2Fopen.tracker.cl%3A1337%2Fannounce';
+        return {
+            name: filename.trim() || nameLine.trim(),
+            infoHash: s.infoHash,
+            magnet: s.infoHash ? `magnet:?xt=urn:btih:${s.infoHash}&dn=${encodeURIComponent(filename.trim())}&${TRACKERS}` : null,
+            seeders, quality, fileIdx: s.fileIdx ?? null, source: 'torrentio',
+        };
+    }).filter(s => s.infoHash);
+}
+
+// ── Internal: fetch from APiBay (The Pirate Bay API) ─────────────────────────
+async function fetchApiBaySources(imdbId, type, season, episode) {
+    const VIDEO_CATS = new Set(['200','201','202','205','206','207','208','500','501','502','503','504']);
+    const TRACKERS = 'tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&tr=udp%3A%2F%2Fopen.tracker.cl%3A1337%2Fannounce';
+
+    console.log(`[APiBay] Fetching: https://apibay.org/q.php?q=${imdbId}`);
+    const resp = await axios.get(`https://apibay.org/q.php?q=${imdbId}`, {
+        timeout: 8000,
+        headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+    });
+
+    const results = resp.data;
+    if (!Array.isArray(results) || results[0]?.name === 'No results returned') return [];
+
+    let filtered = results.filter(t => VIDEO_CATS.has(t.category) && parseInt(t.seeders) > 0);
+
+    // For TV, filter by season+episode pattern if possible
+    if (type !== 'movie' && season && episode) {
+        const s = String(season).padStart(2, '0');
+        const e = String(episode).padStart(2, '0');
+        const pat = new RegExp(`[Ss]0*${season}[Ee]0*${episode}|S${s}E${e}|${season}x${e}`, 'i');
+        const tv = filtered.filter(t => pat.test(t.name));
+        if (tv.length > 0) filtered = tv;
+    }
+
+    const detectQuality = (name) => {
+        const n = name.toLowerCase();
+        if (/4k|2160p|uhd/.test(n)) return '4k';
+        if (/1080p|fhd/.test(n))    return '1080p';
+        if (/720p|hd/.test(n))      return '720p';
+        if (/480p|sd/.test(n))      return '480p';
+        return 'unknown';
+    };
+
+    return filtered
+        .map(t => ({
+            name:     t.name,
+            infoHash: t.info_hash.toLowerCase(),
+            magnet:   `magnet:?xt=urn:btih:${t.info_hash}&dn=${encodeURIComponent(t.name)}&${TRACKERS}`,
+            seeders:  parseInt(t.seeders) || 0,
+            quality:  detectQuality(t.name),
+            fileIdx:  null,
+            source:   'apibay',
+        }))
+        .filter(t => t.infoHash)
+        .slice(0, 30);
+}
+
+
 
 // ── Stream a torrent file to an HTTP response ─────────────────────────────────
 /**
