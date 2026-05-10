@@ -100,10 +100,12 @@ export async function getTorrentSources(imdbId, type, season, episode, movieTitl
         } catch (_) {}
     }
 
+    const cleanTitle = (movieTitle || '').replace(/[:\-]/g, ' ').replace(/\s+/g, ' ').trim();
+
     const [apibayResult, ytsResult, eztvResult, knightResult, bitSearchResult, cometResult, mfResult, torrentioResult] = await Promise.allSettled([
-        fetchApiBaySources(imdbId, type, season, episode, movieTitle),
-        fetchYTSSources(imdbId, movieTitle),
-        fetchEZTVSources(imdbId, movieTitle, season, episode),
+        fetchApiBaySources(imdbId, type, season, episode, cleanTitle),
+        fetchYTSSources(imdbId, cleanTitle),
+        fetchEZTVSources(imdbId, cleanTitle, season, episode),
         fetchKnightCrawlerSources(imdbId, type, season, episode),
         fetchBitSearchSources(imdbId, type, season, episode),
         fetchCometSources(imdbId, type, season, episode),
@@ -150,6 +152,8 @@ export async function getTorrentSources(imdbId, type, season, episode, movieTitl
 
 // ── Internal: fetch from Torrentio ────────────────────────────────────────────
 async function fetchTorrentioSources(imdbId, type, season, episode) {
+    if (!imdbId || imdbId === 'pending') return [];
+    
     let url;
     if (type === 'movie' || type === 'film') {
         url = `${TORRENTIO_BASE}/${TORRENTIO_OPTIONS}/stream/movie/${imdbId}.json`;
@@ -157,12 +161,14 @@ async function fetchTorrentioSources(imdbId, type, season, episode) {
         url = `${TORRENTIO_BASE}/${TORRENTIO_OPTIONS}/stream/series/${imdbId}:${parseInt(season)||1}:${parseInt(episode)||1}.json`;
     }
     console.log(`[Torrentio] Fetching: ${url}`);
-    const resp = await proxyAxios.get(url, { 
-        timeout: 12000, 
-        headers: { ...BROWSER_HEADERS, 'Accept': 'application/json' } 
-    });
-    const streams = resp.data?.streams || [];
-    if (!streams.length) { console.warn('[Torrentio] No streams'); return []; }
+    
+    try {
+        const resp = await proxyAxios.get(url, { 
+            timeout: 12000, 
+            headers: { ...BROWSER_HEADERS, 'Accept': 'application/json' } 
+        });
+        const streams = resp.data?.streams || [];
+        if (!streams.length) { console.warn('[Torrentio] No streams'); return []; }
 
     return streams.map(s => {
         const nameLine  = s.name  || '';
@@ -185,6 +191,10 @@ async function fetchTorrentioSources(imdbId, type, season, episode) {
             seeders, quality, fileIdx: s.fileIdx ?? null, source: 'torrentio',
         };
     }).filter(s => s.infoHash);
+    } catch (e) {
+        console.warn(`[Torrentio] Error: ${e.message}`);
+        return [];
+    }
 }
 
 // ── Internal: fetch from YTS ──────────────────────────────────────────────────
@@ -245,6 +255,7 @@ async function fetchEZTVSources(imdbId, title, season, episode) {
 
 // ── Internal: fetch from Comet ────────────────────────────────────────────────
 async function fetchCometSources(imdbId, type, season, episode) {
+    if (!imdbId || imdbId === 'pending') return [];
     const COMET_BASE = 'https://comet.strem.fun';
     let idStr = imdbId;
     if (/^\d+$/.test(imdbId)) idStr = `tmdb:${imdbId}`;
@@ -285,6 +296,7 @@ async function fetchCometSources(imdbId, type, season, episode) {
 
 // ── Internal: fetch from KnightCrawler ────────────────────────────────────────
 async function fetchKnightCrawlerSources(imdbId, type, season, episode) {
+    if (!imdbId || imdbId === 'pending') return [];
     const BASE = 'https://knightcrawler.elfhosted.com';
     let idStr = imdbId;
     if (/^\d+$/.test(imdbId)) idStr = `tmdb:${imdbId}`;
@@ -325,6 +337,7 @@ async function fetchKnightCrawlerSources(imdbId, type, season, episode) {
 
 // ── Internal: fetch from BitSearch ────────────────────────────────────────────
 async function fetchBitSearchSources(imdbId, type, season, episode) {
+    if (!imdbId || imdbId === 'pending') return [];
     // BitSearch can be reached via a community Stremio addon or direct API if available.
     // Here we use a reliable community mirror.
     const BASE = 'https://bitsearch.strem.fun';
@@ -366,6 +379,7 @@ async function fetchBitSearchSources(imdbId, type, season, episode) {
 
 // ── Internal: fetch from MediaFusion ──────────────────────────────────────────
 async function fetchMediaFusionSources(imdbId, type, season, episode) {
+    if (!imdbId || imdbId === 'pending') return [];
     const MF_BASE = 'https://mediafusion.fun';
     let idStr = imdbId;
     if (/^\d+$/.test(imdbId)) idStr = `tmdb:${imdbId}`;
