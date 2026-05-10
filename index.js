@@ -1460,22 +1460,11 @@ app.options('/api/torrent/stream', (req, res) => {
     res.sendStatus(204);
 });
 
-// GET /api/torrent/stream — identical pipeline but driven by query params.
-// Used by the frontend video element (src= cannot set custom headers).
-// Token is passed as ?token=... query param instead of Authorization header.
+// GET /api/torrent/stream — streams a torrent file as HTTP with Range support.
+// No auth required — AllDebrid key is global (backend .env), not per-user.
 // infoHash is the fastest path — no Torrentio lookup needed.
 app.get('/api/torrent/stream', async (req, res) => {
-    const { infoHash, imdbId, type = 'movie', season, episode, fileIdx, token, title } = req.query;
-
-    // Auth: accept token from query param (video element can't send Authorization header)
-    if (!token) return res.status(401).json({ error: 'token required' });
-    let publicKey;
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'pstream_secret_key_change_in_prod');
-        publicKey = decoded.publicKey;
-    } catch {
-        return res.status(401).json({ error: 'invalid or expired token' });
-    }
+    const { infoHash, imdbId, type = 'movie', season, episode, fileIdx, title } = req.query;
 
     if (!infoHash && !imdbId) {
         return res.status(400).json({ error: 'infoHash or imdbId required' });
@@ -1508,30 +1497,25 @@ app.get('/api/torrent/stream', async (req, res) => {
             resolvedFileIdx = best.fileIdx ?? 0;
         }
 
-        // --- DEBRID PIPELINE ---
-        if (debridKey && magnetUri) {
-            const debrid = new AllDebrid(debridKey);
-            try {
-                const resolved = await debrid.resolveMagnet(magnetUri, resolvedFileIdx);
-                if (resolved.url) {
-                    console.log(`[TorrentStream GET] AllDebrid SUCCESS. Redirecting to direct link.`);
-                    return res.redirect(resolved.url);
-                }
-            } catch (debridErr) {
-                console.error(`[TorrentStream GET] AllDebrid Error: ${debridErr.message}. Falling back to WebTorrent.`);
-            }
+        // --- ALLDEBRID ONLY — no WebTorrent fallback ---
+        if (!debridKey) {
+            return res.status(503).json({ error: 'AllDebrid not configured on server' });
         }
 
-        // --- WEBTORRENT FALLBACK ---
-        res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-        res.setHeader('Access-Control-Allow-Headers', 'Range');
-        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
+        const debrid = new AllDebrid(debridKey);
+        const resolved = await debrid.resolveMagnet(magnetUri, resolvedFileIdx);
 
-        await streamTorrent(magnetUri, resolvedFileIdx, req, res);
+        if (!resolved?.url) {
+            console.warn(`[TorrentStream GET] AllDebrid: magnet not cached yet (id=${resolved?.id})`);
+            return res.status(503).json({ error: 'AllDebrid: magnet not ready. Try again in a moment.' });
+        }
+
+        console.log(`[TorrentStream GET] ✅ AllDebrid SUCCESS → ${resolved.url.substring(0, 60)}...`);
+        return res.redirect(resolved.url);
 
     } catch (e) {
         console.error(`[TorrentStream GET] Error: ${e.message}`);
-        if (!res.headersSent) res.status(500).json({ error: `Torrent stream failed: ${e.message}` });
+        if (!res.headersSent) res.status(503).json({ error: `AllDebrid failed: ${e.message}` });
     }
 });
 
