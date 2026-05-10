@@ -42,13 +42,16 @@ export async function extractVaPlayer({ tmdbId, type, season, episode } = {}) {
     const { stream_urls, default_subs = [] } = data.data;
 
     // Map each mirror URL to a source.
-    // Keep VaPlayer on backend proxy path so browser never hits CDN directly.
-    // Direct browser mode causes CORS failures on multiple VaPlayer CDN hosts.
+    // noProxy: true → browser fetches the manifest directly using the user's residential IP
+    // (CDN domains block HF/ScraperAPI datacenter IPs but not residential browsers).
+    // The useHls xhrSetup hook then routes all segment requests through /proxy/stream
+    // for CORS header injection without the HF IP touching the CDN.
     const sources = stream_urls.map((url, i) => ({
         url,
         quality: i === stream_urls.length - 1 ? 'auto' : '1080p',
         isM3U8: true,
-        referer: REFERER,
+        noProxy: true,   // browser residential IP bypasses CDN IP blocks
+        referer: REFERER, // passed to xhrSetup for proxy-wrapping segments
         provider: `VaPlayer Mirror ${i + 1}`,
         providerId: 'vaplayer',
     }));

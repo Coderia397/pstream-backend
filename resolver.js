@@ -341,70 +341,51 @@ export async function resolveStreaming(tmdbId, type, season, episode, title, yea
         return result;
     };
 
-    // ══ Stage 1: Full parallel race — ALL M3U8/direct-stream providers ══════
+    // ══ Priority Waterfall: Tier 1 (fast) → Tier 2 (slow fallback) ══════════
     //
-    // Vyla (~2-3s) is the new heavyweight — returns 14+ sources from multiple
-    // underlying providers in a single HTTP call. VaPlayer is fastest for its
-    // own CDN. VidZee/VidSrc.ru/LookMovie add depth.
+    // Tier 1: Vyla, VaPlayer, CineSu — fastest providers (~2-4s).
+    //   If ANY of them succeed → return immediately, no need for Tier 2.
+    //   Tier 1 has a 12s timeout so we don't wait too long.
     //
-    // No embed fallbacks. If zero raw sources found → return error.
-    const providers = [
-        {
-            id: 'vyla',
-            name: 'Vyla Aggregator',
-            run: () => scrapeVyla(tmdbId, type, season, episode)
-        },
-        {
-            id: 'cinesu',
-            name: 'CineSu',
-            run: () => scrapeCineSu(tmdbId, type, season, episode)
-        },
-        {
-            id: 'vaplayer',
-            name: 'VaPlayer',
-            run: () => extractVaPlayer({ tmdbId, type, season, episode })
-        },
-        {
-            id: 'vixsrc',
-            name: 'VixSrc',
-            run: () => scrapeVixSrc(tmdbId, type, season, episode)
-        },
-        {
-            id: 'vidzee',
-            name: 'VidZee',
-            run: () => scrapeVidZee(tmdbId, type, season, episode)
-        },
-        {
-            id: 'vidsrc_ru',
-            name: 'VidSrc.ru',
-            run: () => scrapeVidSrcRu(tmdbId, type, season, episode)
-        },
-        {
-            id: 'lookmovie',
-            name: 'LookMovie',
-            run: () => (title
-                ? scrapeLookMovie(tmdbId, type === 'movie' ? 'movie' : 'show', season, episode, title, year)
-                : Promise.resolve({ success: false, _skipReason: 'no title provided' })
-            )
-        },
-        {
-            id: 'smashystream',
-            name: 'SmashyStream',
-            run: () => scrapeSmashyStream(tmdbId, type, season, episode)
-        },
-        {
-            id: 'moviesapi',
-            name: 'MoviesAPI',
-            run: () => scrapeMoviesApi(tmdbId, type, season, episode)
-        },
+    // Tier 2: VidZee, VidSrc.ru, LookMovie, SmashyStream, MoviesAPI — slower.
+    //   Only tried if ALL Tier 1 providers fail.
+    //   These have known instability so they're deprioritized.
+    //
+    // VixSrc is in Tier 1 as a supplemental — it's fast and clean.
+
+    const tier1 = [
+        { id: 'vyla',    name: 'Vyla Aggregator', run: () => scrapeVyla(tmdbId, type, season, episode) },
+        { id: 'vaplayer',name: 'VaPlayer',         run: () => extractVaPlayer({ tmdbId, type, season, episode }) },
+        { id: 'cinesu',  name: 'CineSu',           run: () => scrapeCineSu(tmdbId, type, season, episode) },
+        { id: 'vixsrc',  name: 'VixSrc',           run: () => scrapeVixSrc(tmdbId, type, season, episode) },
     ];
 
-    const healthyProviders = await filterByHealth(providers);
-    const activeProviders = healthyProviders.length ? healthyProviders : providers;
+    const tier2 = [
+        { id: 'vidzee',      name: 'VidZee',       run: () => scrapeVidZee(tmdbId, type, season, episode) },
+        { id: 'vidsrc_ru',   name: 'VidSrc.ru',    run: () => scrapeVidSrcRu(tmdbId, type, season, episode) },
+        { id: 'lookmovie',   name: 'LookMovie',    run: () => (title
+            ? scrapeLookMovie(tmdbId, type === 'movie' ? 'movie' : 'show', season, episode, title, year)
+            : Promise.resolve({ success: false, _skipReason: 'no title' })) },
+        { id: 'smashystream',name: 'SmashyStream', run: () => scrapeSmashyStream(tmdbId, type, season, episode) },
+        { id: 'moviesapi',   name: 'MoviesAPI',    run: () => scrapeMoviesApi(tmdbId, type, season, episode) },
+    ];
 
-    console.log(`[Resolver] Racing ${activeProviders.length} provider(s): ${activeProviders.map(p => p.name).join(', ')}`);
+    const healthyTier1 = await filterByHealth(tier1);
+    const activeTier1  = healthyTier1.length ? healthyTier1 : tier1;
 
-    const stageResults = await collectExtractorResults(activeProviders, 22000);
+    console.log(`[Resolver] 🥇 Tier 1 racing: ${activeTier1.map(p => p.name).join(', ')}`);
+    const tier1Results = await collectExtractorResults(activeTier1, 12000);
+
+    let stageResults = tier1Results;
+
+    if (!tier1Results.length) {
+        // Tier 1 fully struck out — escalate to slow providers
+        const healthyTier2 = await filterByHealth(tier2);
+        const activeTier2  = healthyTier2.length ? healthyTier2 : tier2;
+        console.log(`[Resolver] 🥈 Tier 1 failed. Tier 2 racing: ${activeTier2.map(p => p.name).join(', ')}`);
+        const tier2Results = await collectExtractorResults(activeTier2, 18000);
+        stageResults = tier2Results;
+    }
 
     if (stageResults.length) {
         const mergedSources   = mergeAndRankSources(stageResults);

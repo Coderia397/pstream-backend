@@ -680,10 +680,15 @@ app.get('/proxy/stream', async (req, res) => {
         // The isM3U8 regex already covers /playlist/ (VixSrc) and all known manifest shapes.
         
         // Use proxyAxios (ScraperAPI) for known blocked domains, even for segments.
+        // VaPlayer rotates CDN domains — ALL of these block HF datacenter IPs directly.
         const blockedPatterns = [
-            'smartmarketingacademy.site', 'personalbrandgrowth.site', 'wealthcreationmethod.site',
+            // VaPlayer CDN rotation domains (confirmed blocking HF IPs)
+            'contentmonetizationlab.site', 'smartmarketingacademy.site',
+            'personalbrandgrowth.site', 'wealthcreationmethod.site',
             'neonhorizonworkshops.com', 'wanderlynest.com', 'orchidpixelgardens.com',
-            'brightpathsignals.com', 'cloudnestra.com', 'vidzee', 'vsembed', 'vidsrc'
+            'brightpathsignals.com', 'cloudnestra.com',
+            // Other known blocked providers
+            'vidzee', 'vsembed', 'vidsrc'
         ];
         const isBlockedDomain = blockedPatterns.some(p => targetUrl.includes(p) || (fetchHeaders.Referer || '').includes(p));
         
