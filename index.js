@@ -16,6 +16,7 @@ import Redis from 'ioredis';
 import { recordProviderError, recordProviderSuccess, getAllProviderHealth, canonicalProviderId } from './services/providerHealth.js';
 import { getTorrentSources, streamTorrent, activeMap as torrentPool } from './services/torrent.js';
 import { resolveTrailerId, getTrailerCacheStats } from './services/trailer.js';
+import { AllDebrid } from './services/alldebrid.js';
 
 dotenv.config();
 // BUILD: 2026-04-16T06:50Z � SuperEmbed Stage1A, proxy?gigaAxios, raceExtractors v14.1
@@ -1334,106 +1335,17 @@ app.get('/api/providers/health', async (req, res) => {
 //
 // Rate limited: 30 req/min per IP (Torrentio has generous limits but we respect them)
 
-const torrentioCache = new Map();
-const TORRENTIO_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-app.get('/api/torrent/sources', authenticateToken, async (req, res) => {
+app.get('/api/torrent/sources', async (req, res) => {
     const { imdbId, type = 'movie', season, episode } = req.query;
 
     if (!imdbId) return res.status(400).json({ error: 'imdbId required' });
 
-    // Rate limit: 30 requests per minute per user
-    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
-    if (rateLimit(`torrent:${ip}`, 30, 60000)) {
-        return res.status(429).json({ error: 'Too many requests' });
-    }
-
-    // Build Torrentio path
-    // Format: /sort=qualitysize|qualityfilter=720p,1080p,2160p/stream/{type}/{imdbId}.json
-    // For series: /stream/series/{imdbId}:{season}:{episode}.json
-    const qualityFilter = 'qualityfilter=720p,1080p,2160p,4k';
-    const sortMode = 'sort=qualitysize';
-    let streamPath;
-
-    if (type === 'movie' || type === 'film') {
-        streamPath = `stream/movie/${imdbId}.json`;
-    } else {
-        const s = parseInt(season) || 1;
-        const e = parseInt(episode) || 1;
-        streamPath = `stream/series/${imdbId}:${s}:${e}.json`;
-    }
-
-    const torrentioUrl = `https://torrentio.strem.fun/${sortMode}|${qualityFilter}/${streamPath}`;
-    const cacheKey = torrentioUrl;
-
-    // Check cache
-    const cached = torrentioCache.get(cacheKey);
-    if (cached && (Date.now() - cached.ts) < TORRENTIO_CACHE_TTL) {
-        console.log(`[Torrentio] Cache HIT: ${cacheKey}`);
-        return res.json({ success: true, cached: true, ...cached.data });
-    }
-
     try {
-        console.log(`[Torrentio] Fetching: ${torrentioUrl}`);
-        const response = await gigaAxios.get(torrentioUrl, {
-            timeout: 12000,
-            headers: {
-                'Accept': 'application/json',
-                'User-Agent': getRandomUA(),
-            },
-        });
-
-        const streams = (response.data?.streams || []).map(stream => {
-            // Parse quality from the title field (e.g. "Inception.2010.2160p.BluRay...")
-            const title = stream.title || stream.name || '';
-            const qualityMatch = title.match(/\b(4k|2160p|1080p|720p|480p)\b/i);
-            const quality = qualityMatch ? qualityMatch[1].toLowerCase() : 'unknown';
-
-            // Extract seeder count from behaviorHints or title
-            const seeders = stream.behaviorHints?.videoSize
-                ? Math.floor(stream.behaviorHints.videoSize / 1e8) // rough estimate
-                : null;
-
-            // Build full magnet from infoHash if present
-            const infoHash = stream.infoHash;
-            const magnetLink = infoHash
-                ? `magnet:?xt=urn:btih:${infoHash}&dn=${encodeURIComponent(title)}&tr=udp%3A%2F%2Fopen.demonii.com%3A1337&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A80&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Fglotorrents.pw%3A6969`
-                : null;
-
-            return {
-                title:     title.split('\n')[0].trim(), // first line = filename
-                quality,
-                infoHash:  infoHash || null,
-                magnet:    magnetLink,
-                fileIdx:   stream.fileIdx ?? 0,
-                seeders,
-                provider:  stream.name || 'Torrentio',
-            };
-        }).filter(s => s.infoHash || s.magnet); // only return usable sources
-
-        // Sort by quality
-        const qualityRank = { '4k': 0, '2160p': 0, '1080p': 1, '720p': 2, '480p': 3, 'unknown': 4 };
-        streams.sort((a, b) => (qualityRank[a.quality] ?? 4) - (qualityRank[b.quality] ?? 4));
-
-        const result = {
-            streams,
-            total:   streams.length,
-            imdbId,
-            type,
-        };
-
-        torrentioCache.set(cacheKey, { ts: Date.now(), data: result });
-
-        console.log(`[Torrentio] ✅ ${streams.length} sources for ${imdbId} (${type})`);
-        return res.json({ success: true, ...result });
-
+        const sources = await getTorrentSources(imdbId, type, season, episode, redis);
+        res.json({ streams: sources });
     } catch (e) {
-        console.warn(`[Torrentio] Error: ${e.response?.status || e.message}`);
-        return res.status(502).json({
-            success: false,
-            error: `Torrentio unavailable: ${e.message}`,
-            streams: [],
-        });
+        console.error('[TorrentSources] Error:', e.message);
+        res.status(500).json({ error: e.message });
     }
 });
 
@@ -1450,16 +1362,19 @@ app.get('/api/torrent/sources', authenticateToken, async (req, res) => {
 // The frontend calls this only after 2 failed attempts with regular providers.
 // Continuous range requests from the video player keep the HF Space awake.
 
-app.post('/api/torrent/stream', authenticateToken, async (req, res) => {
+app.post('/api/torrent/stream', async (req, res) => {
     const { imdbId, type = 'movie', season, episode, magnetOverride, fileIdx } = req.body || {};
 
-    if (!imdbId) {
-        return res.status(400).json({ error: 'imdbId is required' });
+    if (!imdbId && !magnetOverride) {
+        return res.status(400).json({ error: 'imdbId or magnetOverride is required' });
     }
 
     try {
         let magnetUri = magnetOverride || null;
         let resolvedFileIdx = fileIdx != null ? parseInt(fileIdx) : null;
+
+        // Fetch global Debrid Key
+        const debridKey = process.env.ALLDEBRID_API_KEY;
 
         // If no magnetOverride given, fetch from Torrentio
         if (!magnetUri) {
@@ -1477,6 +1392,38 @@ app.post('/api/torrent/stream', authenticateToken, async (req, res) => {
             return res.status(500).json({ error: 'Could not resolve magnet link' });
         }
 
+        // --- DEBRID PIPELINE ---
+        if (debridKey) {
+            console.log(`[TorrentStream] User has Debrid. Attempting AllDebrid resolution...`);
+            const debrid = new AllDebrid(debridKey);
+            try {
+                const resolved = await debrid.resolveMagnet(magnetUri, resolvedFileIdx);
+                if (resolved.url) {
+                    console.log(`[TorrentStream] AllDebrid SUCCESS: ${resolved.url.substring(0, 50)}...`);
+                    // Return the direct link to the frontend
+                    return res.json({ 
+                        success: true, 
+                        url: resolved.url, 
+                        filename: resolved.filename,
+                        filesize: resolved.filesize,
+                        isDebrid: true 
+                    });
+                } else if (resolved.id) {
+                    console.log(`[TorrentStream] AllDebrid: Magnet added but not ready (ID: ${resolved.id})`);
+                    return res.json({
+                        success: true,
+                        isDebrid: true,
+                        ready: false,
+                        id: resolved.id,
+                        status: 'downloading'
+                    });
+                }
+            } catch (debridErr) {
+                console.error(`[TorrentStream] AllDebrid Error: ${debridErr.message}. Falling back to WebTorrent.`);
+            }
+        }
+
+        // --- WEBTORRENT FALLBACK ---
         // Set CORS headers explicitly (range requests need this)
         res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
         res.setHeader('Access-Control-Allow-Headers', 'Range, Authorization');
@@ -1510,8 +1457,10 @@ app.get('/api/torrent/stream', async (req, res) => {
 
     // Auth: accept token from query param (video element can't send Authorization header)
     if (!token) return res.status(401).json({ error: 'token required' });
+    let publicKey;
     try {
-        jwt.verify(token, process.env.JWT_SECRET || 'pstream_secret_key_change_in_prod');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'pstream_secret_key_change_in_prod');
+        publicKey = decoded.publicKey;
     } catch {
         return res.status(401).json({ error: 'invalid or expired token' });
     }
@@ -1524,6 +1473,9 @@ app.get('/api/torrent/stream', async (req, res) => {
         let magnetUri = null;
         let resolvedFileIdx = fileIdx != null ? parseInt(fileIdx) : null;
 
+        // Use global Debrid Key
+        const debridKey = process.env.ALLDEBRID_API_KEY;
+
         if (infoHash) {
             // Fast path: build magnet directly from infoHash (no external lookup needed)
             const trackers = [
@@ -1535,27 +1487,30 @@ app.get('/api/torrent/stream', async (req, res) => {
                 'udp://torrent.gresille.org:80',
             ].map(t => `tr=${encodeURIComponent(t)}`).join('&');
             magnetUri = `magnet:?xt=urn:btih:${infoHash}&${trackers}`;
-            console.log(`[TorrentStream GET] Fast-path via infoHash: ${infoHash}`);
         } else {
-            // Slow path: fetch from Torrentio (same as POST route)
-            const qualityFilter = 'qualityfilter=720p,1080p,2160p,4k';
-            const sortMode = 'sort=qualitysize';
-            let streamPath = type === 'movie' || type === 'film'
-                ? `stream/movie/${imdbId}.json`
-                : `stream/series/${imdbId}:${parseInt(season)||1}:${parseInt(episode)||1}.json`;
-            const url = `https://torrentio.strem.fun/${sortMode}|${qualityFilter}/${streamPath}`;
-            const resp = await gigaAxios.get(url, { timeout: 12000 });
-            const streams = (resp.data?.streams || []).filter(s => s.infoHash);
-            if (!streams.length) return res.status(404).json({ error: 'No torrent sources found' });
-            const best = streams[0];
-            const trackers = [
-                'udp://open.demonii.com:1337',
-                'udp://tracker.openbittorrent.com:80',
-            ].map(t => `tr=${encodeURIComponent(t)}`).join('&');
-            magnetUri = `magnet:?xt=urn:btih:${best.infoHash}&${trackers}`;
+            // Slow path: fetch from Torrentio
+            const sources = await getTorrentSources(imdbId, type, season, episode, redis);
+            if (!sources.length) return res.status(404).json({ error: 'No torrent sources found' });
+            const best = sources[0];
+            magnetUri = best.magnet;
             resolvedFileIdx = best.fileIdx ?? 0;
         }
 
+        // --- DEBRID PIPELINE ---
+        if (debridKey && magnetUri) {
+            const debrid = new AllDebrid(debridKey);
+            try {
+                const resolved = await debrid.resolveMagnet(magnetUri, resolvedFileIdx);
+                if (resolved.url) {
+                    console.log(`[TorrentStream GET] AllDebrid SUCCESS. Redirecting to direct link.`);
+                    return res.redirect(resolved.url);
+                }
+            } catch (debridErr) {
+                console.error(`[TorrentStream GET] AllDebrid Error: ${debridErr.message}. Falling back to WebTorrent.`);
+            }
+        }
+
+        // --- WEBTORRENT FALLBACK ---
         res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
         res.setHeader('Access-Control-Allow-Headers', 'Range');
         res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');

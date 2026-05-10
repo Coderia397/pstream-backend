@@ -93,21 +93,25 @@ export async function getTorrentSources(imdbId, type, season, episode, redisClie
         } catch (_) {}
     }
 
-    const [torrentioResult, apibayResult] = await Promise.allSettled([
+    const [torrentioResult, cometResult, mediaFusionResult, apibayResult] = await Promise.allSettled([
         fetchTorrentioSources(imdbId, type, season, episode),
+        fetchCometSources(imdbId, type, season, episode),
+        fetchMediaFusionSources(imdbId, type, season, episode),
         fetchApiBaySources(imdbId, type, season, episode),
     ]);
 
-    const torrentio = torrentioResult.status === 'fulfilled' ? torrentioResult.value : [];
-    const apibay    = apibayResult.status    === 'fulfilled' ? apibayResult.value    : [];
-    console.log(`[Torrent] Torrentio=${torrentio.length} APiBay=${apibay.length}`);
+    const torrentio   = torrentioResult.status    === 'fulfilled' ? torrentioResult.value    : [];
+    const comet       = cometResult.status        === 'fulfilled' ? cometResult.value        : [];
+    const mediaFusion = mediaFusionResult.status  === 'fulfilled' ? mediaFusionResult.value  : [];
+    const apibay      = apibayResult.status       === 'fulfilled' ? apibayResult.value       : [];
+    console.log(`[Torrent] Torrentio=${torrentio.length} Comet=${comet.length} MediaFusion=${mediaFusion.length} APiBay=${apibay.length}`);
 
-    // Merge — Torrentio entries have fileIdx so they take priority over APiBay dupes
+    // Merge — Torrentio entries have fileIdx so they take priority
     const seen    = new Set();
     const merged  = [];
     const qRank   = { '4k': 0, '1080p': 1, '720p': 2, '480p': 3, 'unknown': 4 };
 
-    for (const src of [...torrentio, ...apibay]) {
+    for (const src of [...torrentio, ...comet, ...mediaFusion, ...apibay]) {
         const h = (src.infoHash || '').toLowerCase();
         if (!h || seen.has(h)) continue;
         seen.add(h);
@@ -162,6 +166,80 @@ async function fetchTorrentioSources(imdbId, type, season, episode) {
             seeders, quality, fileIdx: s.fileIdx ?? null, source: 'torrentio',
         };
     }).filter(s => s.infoHash);
+}
+
+// ── Internal: fetch from Comet ────────────────────────────────────────────────
+async function fetchCometSources(imdbId, type, season, episode) {
+    const COMET_BASE = 'https://comet.strem.fun';
+    let url;
+    if (type === 'movie' || type === 'film') {
+        url = `${COMET_BASE}/stream/movie/${imdbId}.json`;
+    } else {
+        url = `${COMET_BASE}/stream/series/${imdbId}:${parseInt(season)||1}:${parseInt(episode)||1}.json`;
+    }
+    
+    try {
+        console.log(`[Comet] Fetching: ${url}`);
+        const resp = await axios.get(url, { timeout: 10000 });
+        const streams = resp.data?.streams || [];
+        return streams.map(s => {
+            const title = s.title || '';
+            const seedMatch = title.match(/👤\s*(\d+)/);
+            const seeders = seedMatch ? parseInt(seedMatch[1]) : 0;
+            
+            let quality = 'unknown';
+            if (/4k|2160p/i.test(title)) quality = '4k';
+            else if (/1080p/i.test(title)) quality = '1080p';
+            else if (/720p/i.test(title)) quality = '720p';
+            
+            return {
+                name: title.split('\n')[0],
+                infoHash: s.infoHash,
+                magnet: s.infoHash ? `magnet:?xt=urn:btih:${s.infoHash}` : null,
+                seeders, quality, fileIdx: s.fileIdx ?? null, source: 'comet',
+            };
+        }).filter(s => s.infoHash);
+    } catch (e) {
+        console.warn(`[Comet] Error: ${e.message}`);
+        return [];
+    }
+}
+
+// ── Internal: fetch from MediaFusion ──────────────────────────────────────────
+async function fetchMediaFusionSources(imdbId, type, season, episode) {
+    const MF_BASE = 'https://mediafusion.fun';
+    let url;
+    if (type === 'movie' || type === 'film') {
+        url = `${MF_BASE}/stream/movie/${imdbId}.json`;
+    } else {
+        url = `${MF_BASE}/stream/series/${imdbId}:${parseInt(season)||1}:${parseInt(episode)||1}.json`;
+    }
+
+    try {
+        console.log(`[MediaFusion] Fetching: ${url}`);
+        const resp = await axios.get(url, { timeout: 10000 });
+        const streams = resp.data?.streams || [];
+        return streams.map(s => {
+            const title = s.description || s.title || '';
+            const seedMatch = title.match(/👤\s*(\d+)/);
+            const seeders = seedMatch ? parseInt(seedMatch[1]) : 0;
+
+            let quality = 'unknown';
+            if (/4k|2160p/i.test(title)) quality = '4k';
+            else if (/1080p/i.test(title)) quality = '1080p';
+            else if (/720p/i.test(title)) quality = '720p';
+
+            return {
+                name: title.split('\n')[0],
+                infoHash: s.infoHash,
+                magnet: s.infoHash ? `magnet:?xt=urn:btih:${s.infoHash}` : null,
+                seeders, quality, fileIdx: s.fileIdx ?? null, source: 'mediafusion',
+            };
+        }).filter(s => s.infoHash);
+    } catch (e) {
+        console.warn(`[MediaFusion] Error: ${e.message}`);
+        return [];
+    }
 }
 
 // ── Internal: fetch from APiBay (The Pirate Bay API) ─────────────────────────
