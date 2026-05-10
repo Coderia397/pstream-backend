@@ -1336,12 +1336,12 @@ app.get('/api/providers/health', async (req, res) => {
 // Rate limited: 30 req/min per IP (Torrentio has generous limits but we respect them)
 
 app.get('/api/torrent/sources', async (req, res) => {
-    const { imdbId, type = 'movie', season, episode } = req.query;
+    const { imdbId, type = 'movie', season, episode, title } = req.query;
 
-    if (!imdbId) return res.status(400).json({ error: 'imdbId required' });
+    if (!imdbId && !title) return res.status(400).json({ error: 'imdbId or title required' });
 
     try {
-        const sources = await getTorrentSources(imdbId, type, season, episode, redis);
+        const sources = await getTorrentSources(imdbId, type, season, episode, title, redis);
         res.json({ streams: sources });
     } catch (e) {
         console.error('[TorrentSources] Error:', e.message);
@@ -1363,10 +1363,10 @@ app.get('/api/torrent/sources', async (req, res) => {
 // Continuous range requests from the video player keep the HF Space awake.
 
 app.post('/api/torrent/stream', async (req, res) => {
-    const { imdbId, type = 'movie', season, episode, magnetOverride, fileIdx } = req.body || {};
+    const { imdbId, type = 'movie', season, episode, magnetOverride, fileIdx, title } = req.body || {};
 
-    if (!imdbId && !magnetOverride) {
-        return res.status(400).json({ error: 'imdbId or magnetOverride is required' });
+    if (!imdbId && !magnetOverride && !title) {
+        return res.status(400).json({ error: 'imdbId, magnetOverride or title is required' });
     }
 
     try {
@@ -1376,9 +1376,9 @@ app.post('/api/torrent/stream', async (req, res) => {
         // Fetch global Debrid Key
         const debridKey = process.env.ALLDEBRID_API_KEY;
 
-        // If no magnetOverride given, fetch from Torrentio
+        // If no magnetOverride given, fetch from various sources
         if (!magnetUri) {
-            const sources = await getTorrentSources(imdbId, type, season, episode, redis);
+            const sources = await getTorrentSources(imdbId, type, season, episode, title, redis);
             if (!sources.length) {
                 return res.status(404).json({ error: 'No torrent sources found for this title' });
             }

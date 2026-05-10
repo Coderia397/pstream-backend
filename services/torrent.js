@@ -78,13 +78,15 @@ setInterval(cleanupIdleTorrents, 5 * 60 * 1000); // run every 5min
  * Fetch magnets from BOTH Torrentio and APiBay simultaneously.
  * Merges, deduplicates by infoHash, sorts by quality → seeders.
  *
- * @param {string} imdbId   - e.g. "tt1375666"
- * @param {string} type     - "movie" | "series"
- * @param {number} season   - TV only
- * @param {number} episode  - TV only
+ * @param {string} imdbId      - e.g. "tt1375666"
+ * @param {string} type        - "movie" | "series"
+ * @param {number} season      - TV only
+ * @param {number} episode     - TV only
+ * @param {string} movieTitle  - Optional text title fallback
+ * @param {object} redisClient - Optional cache client
  * @returns {Array<{name, infoHash, magnet, seeders, quality, fileIdx}>} sorted best-first
  */
-export async function getTorrentSources(imdbId, type, season, episode, redisClient = null) {
+export async function getTorrentSources(imdbId, type, season, episode, movieTitle = '', redisClient = null) {
     const mergedKey = `torrent_merged:${imdbId}:${type}:${season || ''}:${episode || ''}`;
     if (redisClient) {
         try {
@@ -93,25 +95,34 @@ export async function getTorrentSources(imdbId, type, season, episode, redisClie
         } catch (_) {}
     }
 
-    const [torrentioResult, cometResult, mediaFusionResult, apibayResult] = await Promise.allSettled([
-        fetchTorrentioSources(imdbId, type, season, episode),
+    const [apibayResult, ytsResult, eztvResult, knightResult, bitSearchResult, cometResult, mfResult, torrentioResult] = await Promise.allSettled([
+        fetchApiBaySources(imdbId, type, season, episode, movieTitle),
+        fetchYTSSources(imdbId, movieTitle),
+        fetchEZTVSources(imdbId, movieTitle, season, episode),
+        fetchKnightCrawlerSources(imdbId, type, season, episode),
+        fetchBitSearchSources(imdbId, type, season, episode),
         fetchCometSources(imdbId, type, season, episode),
         fetchMediaFusionSources(imdbId, type, season, episode),
-        fetchApiBaySources(imdbId, type, season, episode),
+        fetchTorrentioSources(imdbId, type, season, episode),
     ]);
-
-    const torrentio   = torrentioResult.status    === 'fulfilled' ? torrentioResult.value    : [];
-    const comet       = cometResult.status        === 'fulfilled' ? cometResult.value        : [];
-    const mediaFusion = mediaFusionResult.status  === 'fulfilled' ? mediaFusionResult.value  : [];
+ 
     const apibay      = apibayResult.status       === 'fulfilled' ? apibayResult.value       : [];
-    console.log(`[Torrent] Torrentio=${torrentio.length} Comet=${comet.length} MediaFusion=${mediaFusion.length} APiBay=${apibay.length}`);
+    const yts         = ytsResult.status          === 'fulfilled' ? ytsResult.value          : [];
+    const eztv        = eztvResult.status         === 'fulfilled' ? eztvResult.value         : [];
+    const knight      = knightResult.status       === 'fulfilled' ? knightResult.value       : [];
+    const bitSearch   = bitSearchResult.status    === 'fulfilled' ? bitSearchResult.value    : [];
+    const comet       = cometResult.status        === 'fulfilled' ? cometResult.value        : [];
+    const mediaFusion = mfResult.status           === 'fulfilled' ? mfResult.value           : [];
+    const torrentio   = torrentioResult.status    === 'fulfilled' ? torrentioResult.value    : [];
+
+    console.log(`[Torrent] TPB=${apibay.length} YTS=${yts.length} EZTV=${eztv.length} Knight=${knight.length} BitSearch=${bitSearch.length} Comet=${comet.length} MF=${mediaFusion.length} Torrentio=${torrentio.length}`);
 
     // Merge — Torrentio entries have fileIdx so they take priority
     const seen    = new Set();
     const merged  = [];
     const qRank   = { '4k': 0, '1080p': 1, '720p': 2, '480p': 3, 'unknown': 4 };
 
-    for (const src of [...torrentio, ...comet, ...mediaFusion, ...apibay]) {
+    for (const src of [...apibay, ...yts, ...eztv, ...knight, ...bitSearch, ...comet, ...mediaFusion, ...torrentio]) {
         const h = (src.infoHash || '').toLowerCase();
         if (!h || seen.has(h)) continue;
         seen.add(h);
@@ -168,6 +179,62 @@ async function fetchTorrentioSources(imdbId, type, season, episode) {
     }).filter(s => s.infoHash);
 }
 
+// ── Internal: fetch from YTS ──────────────────────────────────────────────────
+async function fetchYTSSources(imdbId, title) {
+    if (!imdbId || imdbId === 'pending') return [];
+    const url = `https://yts.mx/api/v2/list_movies.json?query_term=${imdbId}`;
+    try {
+        console.log(`[YTS] Fetching: ${url}`);
+        const resp = await axios.get(url, { timeout: 8000 });
+        const movie = resp.data?.data?.movies?.[0];
+        if (!movie || !movie.torrents) return [];
+
+        return movie.torrents.map(t => ({
+            name: `${movie.title} (${movie.year}) [${t.quality}] [YTS]`,
+            infoHash: t.hash.toLowerCase(),
+            magnet: `magnet:?xt=urn:btih:${t.hash}&dn=${encodeURIComponent(movie.title)}`,
+            seeders: t.seeds || 0,
+            quality: t.quality === '2160p' ? '4k' : t.quality,
+            fileIdx: null,
+            source: 'yts'
+        }));
+    } catch (e) {
+        console.warn(`[YTS] Error: ${e.message}`);
+        return [];
+    }
+}
+
+// ── Internal: fetch from EZTV ─────────────────────────────────────────────────
+async function fetchEZTVSources(imdbId, title, season, episode) {
+    if (!imdbId || imdbId === 'pending') return [];
+    // EZTV API uses the numeric part of IMDB ID
+    const idNumeric = imdbId.replace(/\D/g, '');
+    const url = `https://eztv.re/api/get-torrents?imdb_id=${idNumeric}`;
+    try {
+        console.log(`[EZTV] Fetching: ${url}`);
+        const resp = await axios.get(url, { timeout: 10000 });
+        const torrents = resp.data?.torrents || [];
+        
+        const s = parseInt(season);
+        const e = parseInt(episode);
+        
+        return torrents
+            .filter(t => parseInt(t.season) === s && parseInt(t.episode) === e)
+            .map(t => ({
+                name: t.title,
+                infoHash: t.hash.toLowerCase(),
+                magnet: t.magnet_url,
+                seeders: t.seeds || 0,
+                quality: /1080p/i.test(t.title) ? '1080p' : (/720p/i.test(t.title) ? '720p' : 'unknown'),
+                fileIdx: null,
+                source: 'eztv'
+            }));
+    } catch (e) {
+        console.warn(`[EZTV] Error: ${e.message}`);
+        return [];
+    }
+}
+
 // ── Internal: fetch from Comet ────────────────────────────────────────────────
 async function fetchCometSources(imdbId, type, season, episode) {
     const COMET_BASE = 'https://comet.strem.fun';
@@ -201,6 +268,81 @@ async function fetchCometSources(imdbId, type, season, episode) {
         }).filter(s => s.infoHash);
     } catch (e) {
         console.warn(`[Comet] Error: ${e.message}`);
+        return [];
+    }
+}
+
+// ── Internal: fetch from KnightCrawler ────────────────────────────────────────
+async function fetchKnightCrawlerSources(imdbId, type, season, episode) {
+    const BASE = 'https://knightcrawler.elfhosted.com';
+    let url;
+    if (type === 'movie' || type === 'film') {
+        url = `${BASE}/stream/movie/${imdbId}.json`;
+    } else {
+        url = `${BASE}/stream/series/${imdbId}:${parseInt(season)||1}:${parseInt(episode)||1}.json`;
+    }
+    
+    try {
+        console.log(`[KnightCrawler] Fetching: ${url}`);
+        const resp = await axios.get(url, { timeout: 10000 });
+        const streams = resp.data?.streams || [];
+        return streams.map(s => {
+            const title = s.title || '';
+            const seedMatch = title.match(/👤\s*(\d+)/);
+            const seeders = seedMatch ? parseInt(seedMatch[1]) : 0;
+            
+            let quality = 'unknown';
+            if (/4k|2160p/i.test(title)) quality = '4k';
+            else if (/1080p/i.test(title)) quality = '1080p';
+            else if (/720p/i.test(title)) quality = '720p';
+            
+            return {
+                name: title.split('\n')[0],
+                infoHash: s.infoHash,
+                magnet: s.infoHash ? `magnet:?xt=urn:btih:${s.infoHash}` : null,
+                seeders, quality, fileIdx: s.fileIdx ?? null, source: 'knightcrawler',
+            };
+        }).filter(s => s.infoHash);
+    } catch (e) {
+        console.warn(`[KnightCrawler] Error: ${e.message}`);
+        return [];
+    }
+}
+
+// ── Internal: fetch from BitSearch ────────────────────────────────────────────
+async function fetchBitSearchSources(imdbId, type, season, episode) {
+    // BitSearch can be reached via a community Stremio addon or direct API if available.
+    // Here we use a reliable community mirror.
+    const BASE = 'https://bitsearch.strem.fun';
+    let url;
+    if (type === 'movie' || type === 'film') {
+        url = `${BASE}/stream/movie/${imdbId}.json`;
+    } else {
+        url = `${BASE}/stream/series/${imdbId}:${parseInt(season)||1}:${parseInt(episode)||1}.json`;
+    }
+    
+    try {
+        console.log(`[BitSearch] Fetching: ${url}`);
+        const resp = await axios.get(url, { timeout: 10000 });
+        const streams = resp.data?.streams || [];
+        return streams.map(s => {
+            const title = s.title || '';
+            const seeders = s.seeders || 0;
+            
+            let quality = 'unknown';
+            if (/4k|2160p/i.test(title)) quality = '4k';
+            else if (/1080p/i.test(title)) quality = '1080p';
+            else if (/720p/i.test(title)) quality = '720p';
+            
+            return {
+                name: title.split('\n')[0],
+                infoHash: s.infoHash,
+                magnet: s.infoHash ? `magnet:?xt=urn:btih:${s.infoHash}` : null,
+                seeders, quality, fileIdx: s.fileIdx ?? null, source: 'bitsearch',
+            };
+        }).filter(s => s.infoHash);
+    } catch (e) {
+        console.warn(`[BitSearch] Error: ${e.message}`);
         return [];
     }
 }
@@ -243,51 +385,66 @@ async function fetchMediaFusionSources(imdbId, type, season, episode) {
 }
 
 // ── Internal: fetch from APiBay (The Pirate Bay API) ─────────────────────────
-async function fetchApiBaySources(imdbId, type, season, episode) {
+async function fetchApiBaySources(imdbId, type, season, episode, title = '') {
     const VIDEO_CATS = new Set(['200','201','202','205','206','207','208','500','501','502','503','504']);
     const TRACKERS = 'tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&tr=udp%3A%2F%2Fopen.tracker.cl%3A1337%2Fannounce';
 
-    console.log(`[APiBay] Fetching: https://apibay.org/q.php?q=${imdbId}`);
-    const resp = await axios.get(`https://apibay.org/q.php?q=${imdbId}`, {
-        timeout: 8000,
-        headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
-    });
+    let query = imdbId;
+    if (!query || query === 'pending') query = title;
+    if (!query) return [];
 
-    const results = resp.data;
-    if (!Array.isArray(results) || results[0]?.name === 'No results returned') return [];
+    console.log(`[APiBay] Fetching: https://apibay.org/q.php?q=${query}`);
+    try {
+        const resp = await axios.get(`https://apibay.org/q.php?q=${encodeURIComponent(query)}`, {
+            timeout: 8000,
+            headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+        });
 
-    let filtered = results.filter(t => VIDEO_CATS.has(t.category) && parseInt(t.seeders) > 0);
+        const results = resp.data;
+        if (!Array.isArray(results) || results[0]?.name === 'No results returned') {
+            // Fallback to title search if IMDB ID failed
+            if (query === imdbId && title) {
+                return fetchApiBaySources('', type, season, episode, title);
+            }
+            return [];
+        }
 
-    // For TV, filter by season+episode pattern if possible
-    if (type !== 'movie' && season && episode) {
-        const s = String(season).padStart(2, '0');
-        const e = String(episode).padStart(2, '0');
-        const pat = new RegExp(`[Ss]0*${season}[Ee]0*${episode}|S${s}E${e}|${season}x${e}`, 'i');
-        const tv = filtered.filter(t => pat.test(t.name));
-        if (tv.length > 0) filtered = tv;
+        let filtered = results.filter(t => VIDEO_CATS.has(t.category) && parseInt(t.seeders) > 0);
+
+        // For TV, filter by season+episode pattern if possible
+        if (type !== 'movie' && season && episode) {
+            const s = String(season).padStart(2, '0');
+            const e = String(episode).padStart(2, '0');
+            const pat = new RegExp(`[Ss]0*${season}[Ee]0*${episode}|S${s}E${e}|${season}x${e}`, 'i');
+            const tv = filtered.filter(t => pat.test(t.name));
+            if (tv.length > 0) filtered = tv;
+        }
+
+        const detectQuality = (name) => {
+            const n = name.toLowerCase();
+            if (/4k|2160p|uhd/.test(n)) return '4k';
+            if (/1080p|fhd/.test(n))    return '1080p';
+            if (/720p|hd/.test(n))      return '720p';
+            if (/480p|sd/.test(n))      return '480p';
+            return 'unknown';
+        };
+
+        return filtered
+            .map(t => ({
+                name:     t.name,
+                infoHash: t.info_hash.toLowerCase(),
+                magnet:   `magnet:?xt=urn:btih:${t.info_hash}&dn=${encodeURIComponent(t.name)}&${TRACKERS}`,
+                seeders:  parseInt(t.seeders) || 0,
+                quality:  detectQuality(t.name),
+                fileIdx:  null,
+                source:   'apibay',
+            }))
+            .filter(t => t.infoHash)
+            .slice(0, 30);
+    } catch (e) {
+        console.warn(`[APiBay] Error: ${e.message}`);
+        return [];
     }
-
-    const detectQuality = (name) => {
-        const n = name.toLowerCase();
-        if (/4k|2160p|uhd/.test(n)) return '4k';
-        if (/1080p|fhd/.test(n))    return '1080p';
-        if (/720p|hd/.test(n))      return '720p';
-        if (/480p|sd/.test(n))      return '480p';
-        return 'unknown';
-    };
-
-    return filtered
-        .map(t => ({
-            name:     t.name,
-            infoHash: t.info_hash.toLowerCase(),
-            magnet:   `magnet:?xt=urn:btih:${t.info_hash}&dn=${encodeURIComponent(t.name)}&${TRACKERS}`,
-            seeders:  parseInt(t.seeders) || 0,
-            quality:  detectQuality(t.name),
-            fileIdx:  null,
-            source:   'apibay',
-        }))
-        .filter(t => t.infoHash)
-        .slice(0, 30);
 }
 
 
