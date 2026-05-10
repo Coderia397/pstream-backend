@@ -1520,6 +1520,61 @@ app.get('/api/torrent/stream', async (req, res) => {
 });
 
 
+// GET /api/torrent/resolve — resolves AllDebrid CDN URL and returns it as JSON.
+// Same logic as /api/torrent/stream but returns { url } instead of a redirect.
+// Used by the frontend to get the final CDN URL directly (avoids CORS redirect issues
+// when the browser follows a cross-origin 302 to an AllDebrid CDN host).
+app.get('/api/torrent/resolve', async (req, res) => {
+    const { infoHash, imdbId, type = 'movie', season, episode, fileIdx, title } = req.query;
+
+    if (!infoHash && !imdbId) {
+        return res.status(400).json({ error: 'infoHash or imdbId required' });
+    }
+
+    try {
+        let magnetUri = null;
+        let resolvedFileIdx = fileIdx != null ? parseInt(fileIdx) : null;
+
+        const debridKey = process.env.ALLDEBRID_API_KEY;
+        if (!debridKey) {
+            return res.status(503).json({ error: 'AllDebrid not configured on server' });
+        }
+
+        if (infoHash) {
+            const trackers = [
+                'udp://open.demonii.com:1337',
+                'udp://tracker.openbittorrent.com:80',
+                'udp://tracker.coppersurfer.tk:6969',
+                'udp://glotorrents.pw:6969',
+                'udp://tracker.opentrackr.org:1337',
+                'udp://torrent.gresille.org:80',
+            ].map(t => `tr=${encodeURIComponent(t)}`).join('&');
+            magnetUri = `magnet:?xt=urn:btih:${infoHash}&${trackers}`;
+        } else {
+            const sources = await getTorrentSources(imdbId, type, season, episode, title, redis);
+            if (!sources.length) return res.status(404).json({ error: 'No torrent sources found' });
+            magnetUri = sources[0].magnet;
+            resolvedFileIdx = sources[0].fileIdx ?? 0;
+        }
+
+        const debrid = new AllDebrid(debridKey);
+        const resolved = await debrid.resolveMagnet(magnetUri, resolvedFileIdx);
+
+        if (!resolved?.url) {
+            console.warn(`[TorrentResolve] AllDebrid: magnet not cached yet (id=${resolved?.id})`);
+            return res.status(503).json({ error: 'AllDebrid: magnet not ready. Try again in a moment.' });
+        }
+
+        console.log(`[TorrentResolve] ✅ ${resolved.url.substring(0, 80)}...`);
+        return res.json({ url: resolved.url });
+
+    } catch (e) {
+        console.error(`[TorrentResolve] Error: ${e.message}`);
+        if (!res.headersSent) res.status(503).json({ error: `AllDebrid failed: ${e.message}` });
+    }
+});
+
+
 
 // ── KEEP-ALIVE PING ───────────────────────────────────────────────────────────
 // Frontend pings this every 30s when user is idle to prevent HF Space sleep.
