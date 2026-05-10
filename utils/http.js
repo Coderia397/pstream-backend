@@ -80,12 +80,21 @@ export const gigaAxios = axios.create({
 // their own residential proxy pool. Free tier: 1000 req/month @ scraperapi.com
 //
 // To enable: add SCRAPER_API_KEY to HF Space secrets
-const SCRAPER_API_KEY = process.env.SCRAPER_API_KEY || '';
+const SCRAPER_KEYS = (process.env.SCRAPER_API_KEY || '').split(',').map(k => k.trim()).filter(k => k);
+let currentKeyIdx = 0;
+
+function getNextScraperKey() {
+    if (!SCRAPER_KEYS.length) return null;
+    const key = SCRAPER_KEYS[currentKeyIdx];
+    currentKeyIdx = (currentKeyIdx + 1) % SCRAPER_KEYS.length;
+    return key;
+}
 
 // Convenience wrapper for one-shot ScraperAPI fetches from extractors
 export async function scraperApiFetch(targetUrl, extraOptions = {}) {
-    if (!SCRAPER_API_KEY) throw new Error('[ScraperAPI] SCRAPER_API_KEY not set');
-    const apiUrl = `https://api.scraperapi.com/?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false`;
+    const key = getNextScraperKey();
+    if (!key) throw new Error('[ScraperAPI] No keys available');
+    const apiUrl = `https://api.scraperapi.com/?api_key=${key}&url=${encodeURIComponent(targetUrl)}&render=false`;
     const { data } = await gigaAxios.get(apiUrl, { timeout: 22000, ...extraOptions });
     return data;
 }
@@ -111,24 +120,37 @@ proxyAxios.interceptors.response.use(
             || error.code === 'ECONNREFUSED'
             || (error.message || '').includes('407');
 
-        if (!isProxyIssue) return Promise.reject(error);
+        // Special handling for ScraperAPI exhaustion (403)
+        const isScraperExhaustion = status === 403 && config.url?.includes('scraperapi.com');
+
+        if (!isProxyIssue && !isScraperExhaustion) return Promise.reject(error);
 
         config._isRetry = true;
 
-        // ── Tier 2: ScraperAPI ───────────────────────────────────────────────
-        if (SCRAPER_API_KEY) {
-            console.warn(`[HTTP] Proxy Failure (${status || error.code}). Trying ScraperAPI (tier-2)...`);
-            try {
-                const scraperUrl = `https://api.scraperapi.com/?api_key=${SCRAPER_API_KEY}&url=${encodeURIComponent(config.url)}&render=false`;
-                return await gigaAxios.get(scraperUrl, {
-                    responseType: config.responseType,
-                    timeout: 22000,
-                });
-            } catch (scraperErr) {
-                console.warn(`[HTTP] ScraperAPI failed: ${scraperErr.message}. Falling to HF bare IP (tier-3)...`);
+        // ── Tier 2: ScraperAPI (with Rotation) ───────────────────────────────
+        if (SCRAPER_KEYS.length > 0) {
+            console.warn(`[HTTP] Proxy/Scraper Issue (${status || error.code}). Trying next ScraperAPI key...`);
+            
+            // Try up to 3 times with different keys if we have them
+            for (let i = 0; i < Math.min(SCRAPER_KEYS.length, 3); i++) {
+                const key = getNextScraperKey();
+                try {
+                    const scraperUrl = `https://api.scraperapi.com/?api_key=${key}&url=${encodeURIComponent(config.url)}&render=false`;
+                    return await gigaAxios.get(scraperUrl, {
+                        responseType: config.responseType,
+                        timeout: 22000,
+                    });
+                } catch (scraperErr) {
+                    if (scraperErr.response?.status === 403) {
+                        console.warn(`[HTTP] ScraperAPI Key Exhausted (403). Trying another...`);
+                        continue;
+                    }
+                    console.warn(`[HTTP] ScraperAPI failed: ${scraperErr.message}. Falling to HF bare IP (tier-3)...`);
+                    break;
+                }
             }
         } else {
-            console.warn(`[HTTP] Proxy Failure (${status || error.code}). No ScraperAPI key → bare HF IP (tier-3).`);
+            console.warn(`[HTTP] Proxy Failure (${status || error.code}). No ScraperAPI keys → bare HF IP (tier-3).`);
         }
 
         // ── Tier 3: HF bare IP ───────────────────────────────────────────────
