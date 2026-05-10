@@ -48,11 +48,6 @@ export async function extractVaPlayer({ tmdbId, type, season, episode } = {}) {
         url,
         quality: i === stream_urls.length - 1 ? 'auto' : '1080p',
         isM3U8: true,
-        // noProxy: true — VaPlayer CDN rotates disposable domains (personalbrandgrowth.site,
-        // wealthcreationmethod.site etc.) that block HF datacenter IPs AND have no CORS headers.
-        // JustHD (tmstrd.justhd.tv) is the exception: it has CORS headers + doesn't block HF IPs.
-        // Browser residential IP + noProxy works for JustHD but CORS-fails on the other domains.
-        noProxy: true,
         referer: REFERER,
         provider: `VaPlayer Mirror ${i + 1}`,
         providerId: 'vaplayer',

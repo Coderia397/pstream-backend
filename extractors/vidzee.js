@@ -217,10 +217,6 @@ export async function scrapeVidZee(tmdbId, type, season, episode) {
             url,
             quality: 'auto',
             isM3U8: true,
-            // VidZee CDN (neonhorizonworkshops, wanderlynest, orchidpixelgardens etc.)
-            // blocks HF datacenter IPs. noProxy: true → browser fetches directly from
-            // residential IP, which the CDN does NOT block.
-            noProxy: true,
             referer: BASE_URL + '/',
         }));
 

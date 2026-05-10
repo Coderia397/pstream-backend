@@ -621,10 +621,8 @@ app.get('/proxy/stream', async (req, res) => {
         // Add each new domain here as they rotate so the proxy fast-fails
         // (returning CDN_BLOCK) rather than waiting for a 403 upstream.
         const CDN_BLOCKLIST = [
-            'neonhorizonworkshops.com','wanderlynest.com','orchidpixelgardens.com','zebi.xalaflix.design',
-            'nicheauthorityengine.site','brightpathsignals.com',
-            'wealthcreationmethod.site','personalbrandgrowth.site',
-            // VaPlayer rotates CDN domains — add new ones here as they appear in prod logs
+            // VaPlayer/VidZee/VidSrc domains that previously blocked HF IPs.
+            // Now proxied via ScraperAPI (residential proxy rotation).
         ];
         try {
             const targetHost = new URL(targetUrl).hostname;
@@ -680,7 +678,16 @@ app.get('/proxy/stream', async (req, res) => {
         // ALL other requests (video/audio segments, even extensionless CDN URLs) → stream.
         // IMPORTANT: Never fetch binary segments as 'text' — it corrupts binary data.
         // The isM3U8 regex already covers /playlist/ (VixSrc) and all known manifest shapes.
-        const activeAxios = isM3U8 ? proxyAxios : gigaAxios;
+        
+        // Use proxyAxios (ScraperAPI) for known blocked domains, even for segments.
+        const blockedPatterns = [
+            'smartmarketingacademy.site', 'personalbrandgrowth.site', 'wealthcreationmethod.site',
+            'neonhorizonworkshops.com', 'wanderlynest.com', 'orchidpixelgardens.com',
+            'brightpathsignals.com', 'cloudnestra.com', 'vidzee', 'vsembed', 'vidsrc'
+        ];
+        const isBlockedDomain = blockedPatterns.some(p => targetUrl.includes(p) || (fetchHeaders.Referer || '').includes(p));
+        
+        const activeAxios = (isM3U8 || isBlockedDomain) ? proxyAxios : gigaAxios;
         const responseType = isM3U8 ? 'text' : 'stream';
 
         const activeAxiosOptions = {

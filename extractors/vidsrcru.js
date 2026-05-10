@@ -156,7 +156,6 @@ function buildResult(urls) {
         url,
         quality: 'auto',
         isM3U8: true,
-        noProxy: true,
         referer: 'https://cloudnestra.com/',
     }));
     return {
