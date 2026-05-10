@@ -1453,7 +1453,7 @@ app.options('/api/torrent/stream', (req, res) => {
 // Token is passed as ?token=... query param instead of Authorization header.
 // infoHash is the fastest path — no Torrentio lookup needed.
 app.get('/api/torrent/stream', async (req, res) => {
-    const { infoHash, imdbId, type = 'movie', season, episode, fileIdx, token } = req.query;
+    const { infoHash, imdbId, type = 'movie', season, episode, fileIdx, token, title } = req.query;
 
     // Auth: accept token from query param (video element can't send Authorization header)
     if (!token) return res.status(401).json({ error: 'token required' });
@@ -1489,7 +1489,7 @@ app.get('/api/torrent/stream', async (req, res) => {
             magnetUri = `magnet:?xt=urn:btih:${infoHash}&${trackers}`;
         } else {
             // Slow path: fetch from Torrentio
-            const sources = await getTorrentSources(imdbId, type, season, episode, redis);
+            const sources = await getTorrentSources(imdbId, type, season, episode, title, redis);
             if (!sources.length) return res.status(404).json({ error: 'No torrent sources found' });
             const best = sources[0];
             magnetUri = best.magnet;
