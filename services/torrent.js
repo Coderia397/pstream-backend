@@ -136,10 +136,27 @@ export async function getTorrentSources(imdbId, type, season, episode, movieTitl
         merged.push(src);
     }
 
+    const nonEngKeywords = ['french', 'truefrench', 'vf', 'vostfr', 'ita', 'german', 'ger', 'spa', 'espanol', 'latino'];
+    const detectLanguagePenalty = (name) => {
+        const n = (name || '').toLowerCase();
+        for (const kw of nonEngKeywords) {
+            const regex = new RegExp(`\\b${kw}\\b`, 'i');
+            if (regex.test(n) && !n.includes('multi')) return 100;
+        }
+        return 0;
+    };
+
     merged.sort((a, b) => {
+        // Priority 1: Language (English/Original first)
+        const la = detectLanguagePenalty(a.name), lb = detectLanguagePenalty(b.name);
+        if (la !== lb) return la - lb;
+
+        // Priority 2: Quality
         const qa = qRank[a.quality] ?? 5, qb = qRank[b.quality] ?? 5;
         if (qa !== qb) return qa - qb;
-        return b.seeders - a.seeders;
+
+        // Priority 3: Seeders
+        return (b.seeders || 0) - (a.seeders || 0);
     });
 
     console.log(`[Torrent] ${merged.length} unique sources. Best: ${merged[0]?.quality} @ ${merged[0]?.seeders} seeders`);
