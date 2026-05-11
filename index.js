@@ -604,9 +604,9 @@ function extractSpoofedHeaders(req, targetUrl, defaultReferer) {
 
 
 // 1. Unified Full Proxy Route (Proxies EVERYTHING natively with matched IPs)
-app.get('/proxy/stream', async (req, res) => {
+app.all('/proxy/stream*', async (req, res) => {
     try {
-        const urlStr = req.query.url;
+        const urlStr = req.query.url || req.headers['x-target-url'];
         if (!urlStr) return res.status(400).send('No URL provided');
 
         // Safe bounded URL decode (max 5 iterations, no infinite loop)
@@ -866,10 +866,23 @@ function handleResponse(response, targetUrl, isM3U8, edgeHost, fetchHeaders, res
         return res.send(filteredManifest);
     } else {
         // Binary segment stream (responseType was 'stream') or fallback text
-        res.setHeader('Content-Type', response.headers['content-type'] || 'video/MP2T');
+        let type = response.headers['content-type'] || 'video/MP2T';
+        if (targetUrl.toLowerCase().includes('.mkv')) type = 'video/x-matroska';
+        else if (targetUrl.toLowerCase().includes('.mp4')) type = 'video/mp4';
+
+        res.setHeader('Content-Type', type);
+        res.setHeader('Accept-Ranges', 'bytes'); // CRITICAL for video/audio seeking
+        
         if (response.headers['content-length']) {
             res.setHeader('Content-Length', response.headers['content-length']);
         }
+
+        // Forward Range headers if present in upstream response
+        if (response.headers['content-range']) {
+            res.setHeader('Content-Range', response.headers['content-range']);
+            res.status(206); // Partial Content
+        }
+
         // response.data is a stream when responseType='stream', a string/buffer otherwise
         if (response.data && typeof response.data.pipe === 'function') {
             return response.data.pipe(res);
