@@ -17,6 +17,7 @@ import { recordProviderError, recordProviderSuccess, getAllProviderHealth, canon
 import { getTorrentSources, streamTorrent, activeMap as torrentPool } from './services/torrent.js';
 import { resolveTrailerId, getTrailerCacheStats } from './services/trailer.js';
 import { AllDebrid } from './services/alldebrid.js';
+import { scrapeVdrkCaptions } from './extractors/subs_vdrk.js';
 
 dotenv.config();
 // BUILD: 2026-04-16T06:50Z � SuperEmbed Stage1A, proxy?gigaAxios, raceExtractors v14.1
@@ -920,19 +921,35 @@ app.get('/api/introdb/media', async (req, res) => {
 app.get('/api/introdb/subtitles', async (req, res) => {
     const { tmdb_id, type, season, episode } = req.query;
     try {
-        const url = `https://api.theintrodb.org/api/subtitles?tmdb_id=${tmdb_id}&type=${type}${season ? `&season=${season}` : ''}${episode ? `&episode=${episode}` : ''}`;
-        const response = await gigaAxios.get(url, {
-            headers: {
-                'Origin': 'https://pstream.watch',
-                'Referer': 'https://pstream.watch/',
-                'Accept': 'application/json'
-            },
-            timeout: 8000
-        });
-        res.json(response.data);
+        const introUrl = `https://api.theintrodb.org/api/subtitles?tmdb_id=${tmdb_id}&type=${type}${season ? `&season=${season}` : ''}${episode ? `&episode=${episode}` : ''}`;
+        
+        const [introRes, vdrkSubs] = await Promise.all([
+            gigaAxios.get(introUrl, {
+                headers: { 'Origin': 'https://pstream.watch', 'Referer': 'https://pstream.watch/', 'Accept': 'application/json' },
+                timeout: 8000
+            }).catch(() => ({ data: { subtitles: [] } })),
+            scrapeVdrkCaptions(tmdb_id, type, season, episode).catch(() => [])
+        ]);
+
+        const introSubs = introRes.data?.subtitles || [];
+        const combined = [...introSubs];
+
+        // Merge VDRK subs, avoiding duplicates by URL
+        for (const sub of vdrkSubs) {
+            if (!combined.some(s => s.url === sub.url)) {
+                combined.push({
+                    url: sub.url,
+                    lang: sub.lang || 'en',
+                    label: sub.label || 'Unknown',
+                    isVdrk: true
+                });
+            }
+        }
+
+        res.json({ subtitles: combined });
     } catch (e) {
-        console.warn(`[IntroDB Subtitles] ${e.response?.status || e.message} - returning empty`);
-        res.json({ subtitles: [] }); // Return empty instead of 500
+        console.warn(`[Subtitle Resolution] ${e.message} - returning empty`);
+        res.json({ subtitles: [] });
     }
 });
 
@@ -1348,13 +1365,16 @@ app.get('/api/providers/health', async (req, res) => {
 // Rate limited: 30 req/min per IP (Torrentio has generous limits but we respect them)
 
 app.get('/api/torrent/sources', async (req, res) => {
-    const { imdbId, type = 'movie', season, episode, title } = req.query;
+    const { imdbId, type = 'movie', season, episode, title, tmdbId } = req.query;
 
     if (!imdbId && !title) return res.status(400).json({ error: 'imdbId or title required' });
 
     try {
-        const sources = await getTorrentSources(imdbId, type, season, episode, title, redis);
-        res.json({ streams: sources });
+        const [sources, subtitles] = await Promise.all([
+            getTorrentSources(imdbId, type, season, episode, title, redis),
+            (tmdbId || imdbId) ? scrapeVdrkCaptions(tmdbId || imdbId, type, season, episode).catch(() => []) : Promise.resolve([])
+        ]);
+        res.json({ streams: sources, subtitles });
     } catch (e) {
         console.error('[TorrentSources] Error:', e.message);
         res.status(500).json({ error: e.message });

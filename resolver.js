@@ -23,6 +23,7 @@ import { scrapeCineSu }                    from './extractors/cinesu.js';
 import { scrapeVixSrc }                    from './extractors/vixsrc.js';
 import { scrapeVidSrc as scrapeVidSrcRu }  from './extractors/vidsrcru.js';
 import { scrapeLookMovie }                 from './extractors/lookmovie.js';
+import { scrapeVdrkCaptions }             from './extractors/subs_vdrk.js';
 import { filterByHealth }                  from './services/providerHealth.js';
 
 // ── Quality ranking ─────────────────────────────────────────────────────────
@@ -239,11 +240,14 @@ export async function resolveStreaming(tmdbId, type, season, episode, title, yea
     const active  = healthy.length ? healthy : allProviders;
 
     console.log(`[Resolver] 🏁 Racing: ${active.map(p => p.name).join(', ')}`);
-    const results = await collectExtractorResults(active, 15000);
+    const [results, vdrkSubs] = await Promise.all([
+        collectExtractorResults(active, 15000),
+        scrapeVdrkCaptions(tmdbId, type, season, episode).catch(() => [])
+    ]);
 
     if (results.length) {
         const sources   = mergeAndRankSources(results);
-        const subtitles = mergeSubtitleArrays(results);
+        const subtitles = mergeSubtitleArrays([...results, { subtitles: vdrkSubs }]);
 
         if (sources.length) {
             const winner = [...results].sort((a, b) => (a._elapsedMs || 0) - (b._elapsedMs || 0))[0];
