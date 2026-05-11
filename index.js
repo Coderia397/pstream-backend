@@ -582,7 +582,7 @@ function extractSpoofedHeaders(req, targetUrl, defaultReferer) {
     const referer = customHeaders.referer || mainSearchParams.get('referer') || defaultReferer;
     const origin = customHeaders.origin || (referer ? new URL(referer).origin : '');
 
-    return {
+    const headers = {
         "User-Agent": getRandomUA(),
         "Referer": referer,
         "Origin": origin,
@@ -593,6 +593,12 @@ function extractSpoofedHeaders(req, targetUrl, defaultReferer) {
         "Sec-Fetch-Site": "cross-site",
         "Connection": "keep-alive"
     };
+
+    // CRITICAL: Forward Range header for video streaming
+    const range = req.headers.range || req.headers.Range;
+    if (range) headers["Range"] = range;
+
+    return headers;
 }
 
 
