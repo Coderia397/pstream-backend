@@ -519,6 +519,45 @@ app.get('/proxy/subtitle', async (req, res) => {
     }
 });
 
+// ─── /api/media-probe — Server-side MKV/MP4 Header Probe ──────────────────
+// The browser cannot fetch Debrid CDN URLs directly due to CORS. This endpoint
+// fetches the first 2MB of the file from the server side (no CORS restriction)
+// and returns the raw bytes to the frontend for EBML/MP4 track extraction.
+app.get('/api/media-probe', async (req, res) => {
+    const raw = req.query.url;
+    if (!raw || typeof raw !== 'string') {
+        return res.status(400).json({ error: 'Missing ?url= parameter' });
+    }
+    let targetUrl;
+    try {
+        targetUrl = decodeURIComponent(raw);
+        new URL(targetUrl); // validate
+    } catch {
+        return res.status(400).json({ error: 'Invalid URL' });
+    }
+
+    try {
+        const upstream = await gigaAxios.get(targetUrl, {
+            responseType: 'arraybuffer',
+            timeout: 15000,
+            headers: {
+                'Range': 'bytes=0-2097151', // First 2MB — enough to read MKV/MP4 headers
+                'User-Agent': getRandomUA(),
+                'Accept': '*/*',
+            },
+            maxContentLength: 2 * 1024 * 1024, // Hard cap at 2MB
+        });
+
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        return res.send(Buffer.from(upstream.data));
+    } catch (e) {
+        const status = e.response?.status || 502;
+        return res.status(status).json({ error: `Probe failed: ${e.message}` });
+    }
+});
+
 // --- GIGA PROXY ---
 
 // 1. Full Proxy Manifest Rewriter (Intercepts /proxy/stream)
@@ -582,7 +621,7 @@ function extractSpoofedHeaders(req, targetUrl, defaultReferer) {
     const referer = customHeaders.referer || mainSearchParams.get('referer') || defaultReferer;
     const origin = customHeaders.origin || (referer ? new URL(referer).origin : '');
 
-    const headers = {
+    return {
         "User-Agent": getRandomUA(),
         "Referer": referer,
         "Origin": origin,
@@ -593,20 +632,14 @@ function extractSpoofedHeaders(req, targetUrl, defaultReferer) {
         "Sec-Fetch-Site": "cross-site",
         "Connection": "keep-alive"
     };
-
-    // CRITICAL: Forward Range header for video streaming
-    const range = req.headers.range || req.headers.Range;
-    if (range) headers["Range"] = range;
-
-    return headers;
 }
 
 
 
 // 1. Unified Full Proxy Route (Proxies EVERYTHING natively with matched IPs)
-app.all('/proxy/stream*', async (req, res) => {
+app.get('/proxy/stream', async (req, res) => {
     try {
-        const urlStr = req.query.url || req.headers['x-target-url'];
+        const urlStr = req.query.url;
         if (!urlStr) return res.status(400).send('No URL provided');
 
         // Safe bounded URL decode (max 5 iterations, no infinite loop)
@@ -866,23 +899,10 @@ function handleResponse(response, targetUrl, isM3U8, edgeHost, fetchHeaders, res
         return res.send(filteredManifest);
     } else {
         // Binary segment stream (responseType was 'stream') or fallback text
-        let type = response.headers['content-type'] || 'video/MP2T';
-        if (targetUrl.toLowerCase().includes('.mkv')) type = 'video/x-matroska';
-        else if (targetUrl.toLowerCase().includes('.mp4')) type = 'video/mp4';
-
-        res.setHeader('Content-Type', type);
-        res.setHeader('Accept-Ranges', 'bytes'); // CRITICAL for video/audio seeking
-        
+        res.setHeader('Content-Type', response.headers['content-type'] || 'video/MP2T');
         if (response.headers['content-length']) {
             res.setHeader('Content-Length', response.headers['content-length']);
         }
-
-        // Forward Range headers if present in upstream response
-        if (response.headers['content-range']) {
-            res.setHeader('Content-Range', response.headers['content-range']);
-            res.status(206); // Partial Content
-        }
-
         // response.data is a stream when responseType='stream', a string/buffer otherwise
         if (response.data && typeof response.data.pipe === 'function') {
             return response.data.pipe(res);
