@@ -6,6 +6,7 @@ import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import os from 'os';
+import path from 'path';
 import { spawn } from 'child_process';
 
 import { createChallenge, verifyChallenge } from './utils/challenge.js';
@@ -1826,6 +1827,197 @@ app.get('/trailer/cobalt', async (req, res) => {
 
     console.error(`[Cobalt] All sources failed for ${vid}:\n${errors.join('\n')}`);
     res.status(502).json({ error: 'All stream sources failed', detail: errors });
+});
+
+// ─── HLS Audio Transcoding Pipeline ────────────────────────────────────────────
+// Solves AC3/DTS browser incompatibility for Debrid-sourced MKV files.
+//
+// Strategy (fastest path wins):
+//   1. ffprobe audio tracks → check for native AAC/Opus track
+//   2a. AAC/Opus found  → remux only (c:copy). Zero quality loss, ~instant.
+//   2b. AC3/DTS only    → transcode to AAC. Copy video stream, no re-encode.
+//   3.  Serve HLS segments from /tmp/hls-<sessionId>/
+//   4.  Auto-cleanup sessions after 30min inactivity.
+//
+// The CDN URL is server-IP-locked (AllDebrid resolves it on the server).
+// Server can fetch and transcode it freely — the client just receives HLS.
+
+const HLS_SESSIONS = new Map();
+const HLS_TEMP_BASE = os.tmpdir();
+const HLS_SESSION_TTL = 30 * 60 * 1000; // 30 min
+
+// Auto-cleanup stale sessions every 5 minutes
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, s] of HLS_SESSIONS) {
+        if (now - s.lastAccess > HLS_SESSION_TTL) {
+            try { s.proc?.kill('SIGKILL'); } catch (_) {}
+            try { fs.rmSync(s.dir, { recursive: true, force: true }); } catch (_) {}
+            HLS_SESSIONS.delete(id);
+            console.log(`[HLS] ♻️ Cleaned session ${id}`);
+        }
+    }
+}, 5 * 60 * 1000);
+
+// Probe all audio streams with ffprobe (~200ms, no download)
+async function hlsProbeAudio(url) {
+    return new Promise((resolve) => {
+        const proc = spawn('ffprobe', [
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_streams',
+            '-select_streams', 'a',
+            '-i', url,
+        ]);
+        let out = '';
+        proc.stdout.on('data', d => out += d);
+        proc.on('close', () => {
+            try { resolve(JSON.parse(out).streams || []); }
+            catch { resolve([]); }
+        });
+        proc.on('error', () => resolve([]));
+        setTimeout(() => { try { proc.kill(); } catch (_) {} resolve([]); }, 9000);
+    });
+}
+
+// Pick the best audio track — prefer AAC/Opus (remux), else take first (transcode)
+function hlsPickTrack(streams) {
+    const SAFE = ['aac', 'mp3', 'opus', 'vorbis', 'flac'];
+    const safe = streams.find(s => SAFE.some(c => (s.codec_name || '').toLowerCase().startsWith(c)));
+    if (safe) return { streamIndex: streams.indexOf(safe), codec: safe.codec_name, transcode: false };
+    if (streams[0]) return { streamIndex: 0, codec: streams[0].codec_name, transcode: true };
+    return { streamIndex: 0, codec: 'unknown', transcode: true };
+}
+
+// ─── POST /api/hls/stream — Start a transcode session ───────────────────────
+// Body: { url: string }   (or query ?url=)
+// Returns: { manifestUrl, sessionId, audioCodec, outputCodec, remuxed }
+app.all('/api/hls/stream', async (req, res) => {
+    const raw = req.method === 'POST' ? req.body?.url : req.query.url;
+    if (!raw) return res.status(400).json({ error: 'Missing url' });
+
+    let sourceUrl;
+    try { sourceUrl = decodeURIComponent(String(raw)); new URL(sourceUrl); }
+    catch { return res.status(400).json({ error: 'Invalid URL' }); }
+
+    // Detect Safari → serve AAC; Chrome/FF → still AAC (widest compat for HLS)
+    const ua = (req.headers['user-agent'] || '').toLowerCase();
+    const isSafari = ua.includes('safari') && !ua.includes('chrome') && !ua.includes('chromium');
+    const outputCodec = isSafari ? 'aac' : 'aac'; // Both AAC — HLS TS containers need AAC for widest support
+    const ffmpegAudioCodec = 'aac';
+
+    console.log(`[HLS] 🔍 Probing: ${sourceUrl.substring(0, 70)}...`);
+    const streams = await hlsProbeAudio(sourceUrl);
+    const track = hlsPickTrack(streams);
+    console.log(`[HLS] 🎵 Audio: ${track.codec} (track ${track.streamIndex}) → ${track.transcode ? `transcode→${outputCodec}` : 'remux(copy)'}`);
+
+    const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const sessionDir = path.join(HLS_TEMP_BASE, `hls-${sessionId}`);
+    const manifestFile = path.join(sessionDir, 'index.m3u8');
+
+    try { fs.mkdirSync(sessionDir, { recursive: true }); }
+    catch (e) { return res.status(500).json({ error: 'Failed to create session dir' }); }
+
+    const ffArgs = [
+        '-i', sourceUrl,
+        '-map', '0:v:0',                               // first video stream, pass-through
+        '-map', `0:a:${track.streamIndex}`,             // best audio stream
+        '-c:v', 'copy',                                // video: no re-encode
+        ...(track.transcode
+            ? ['-c:a', ffmpegAudioCodec, '-b:a', '192k', '-ac', '2'] // transcode surround → stereo AAC
+            : ['-c:a', 'copy']),                        // already AAC — just remux
+        '-f', 'hls',
+        '-hls_time', '6',
+        '-hls_list_size', '0',
+        '-hls_flags', 'independent_segments+delete_segments',
+        '-hls_delete_threshold', '3',
+        '-hls_segment_filename', path.join(sessionDir, 'seg%05d.ts'),
+        manifestFile,
+    ];
+
+    const proc = spawn('ffmpeg', ffArgs);
+    let ffError = null;
+
+    proc.stderr.on('data', chunk => {
+        const msg = chunk.toString();
+        if (msg.match(/error|invalid|failed/i)) {
+            console.warn(`[FFmpeg ${sessionId.slice(-6)}] ${msg.slice(0, 120).trim()}`);
+        }
+    });
+    proc.on('error', e => { ffError = e.message; console.error(`[HLS] FFmpeg error: ${e.message}`); });
+    proc.on('close', code => {
+        console.log(`[HLS] Session ${sessionId.slice(-6)} done (exit ${code})`);
+        const s = HLS_SESSIONS.get(sessionId);
+        if (s) s.proc = null;
+    });
+
+    HLS_SESSIONS.set(sessionId, { dir: sessionDir, proc, lastAccess: Date.now() });
+
+    // Wait up to 12s for manifest to appear (first segment write triggers it)
+    const ready = await new Promise(resolve => {
+        const deadline = Date.now() + 12000;
+        const poll = setInterval(() => {
+            if (ffError) { clearInterval(poll); return resolve(false); }
+            if (fs.existsSync(manifestFile)) { clearInterval(poll); return resolve(true); }
+            if (Date.now() > deadline) { clearInterval(poll); return resolve(false); }
+        }, 250);
+    });
+
+    if (!ready) {
+        try { proc.kill('SIGKILL'); } catch (_) {}
+        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (_) {}
+        HLS_SESSIONS.delete(sessionId);
+        return res.status(502).json({ error: ffError || 'FFmpeg did not produce a manifest in time', audioCodec: track.codec });
+    }
+
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+    const host = req.headers.host;
+    const manifestUrl = `${proto}://${host}/api/hls/seg/${sessionId}/index.m3u8`;
+
+    console.log(`[HLS] ✅ Session ready: ${manifestUrl}`);
+    res.json({
+        ok: true,
+        sessionId,
+        manifestUrl,
+        audioCodec: track.codec,
+        outputCodec,
+        remuxed: !track.transcode,
+        tracksFound: streams.length,
+    });
+});
+
+// ─── GET /api/hls/seg/:sessionId/:file — Serve HLS segments ─────────────────
+app.get('/api/hls/seg/:sessionId/:file', (req, res) => {
+    const { sessionId, file } = req.params;
+    const session = HLS_SESSIONS.get(sessionId);
+    if (!session) return res.status(404).json({ error: 'Session expired or not found' });
+
+    session.lastAccess = Date.now();
+
+    const safeName = path.basename(file); // prevent path traversal
+    const filePath = path.join(session.dir, safeName);
+
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'Segment not ready' });
+    }
+
+    const ext = path.extname(safeName).toLowerCase();
+    res.setHeader('Content-Type', ext === '.m3u8' ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(filePath);
+});
+
+// ─── DELETE /api/hls/session/:sessionId — Manual cleanup ─────────────────────
+app.delete('/api/hls/session/:sessionId', (req, res) => {
+    const { sessionId } = req.params;
+    const s = HLS_SESSIONS.get(sessionId);
+    if (s) {
+        try { s.proc?.kill('SIGKILL'); } catch (_) {}
+        try { fs.rmSync(s.dir, { recursive: true, force: true }); } catch (_) {}
+        HLS_SESSIONS.delete(sessionId);
+    }
+    res.json({ ok: true, sessionId });
 });
 
 app.listen(PORT, () => {
