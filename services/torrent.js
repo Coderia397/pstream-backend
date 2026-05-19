@@ -106,7 +106,7 @@ export async function getTorrentSources(imdbId, type, season, episode, movieTitl
         fetchApiBaySources(imdbId, type, season, episode, cleanTitle),
         fetchYTSSources(imdbId, cleanTitle),
         fetchEZTVSources(imdbId, cleanTitle, season, episode),
-        fetchKnightCrawlerSources(imdbId, type, season, episode),
+        fetchJackettioSources(imdbId, type, season, episode),
         fetchBitSearchSources(imdbId, type, season, episode),
         fetchCometSources(imdbId, type, season, episode),
         fetchMediaFusionSources(imdbId, type, season, episode),
@@ -116,20 +116,20 @@ export async function getTorrentSources(imdbId, type, season, episode, movieTitl
     const apibay      = apibayResult.status       === 'fulfilled' ? apibayResult.value       : [];
     const yts         = ytsResult.status          === 'fulfilled' ? ytsResult.value          : [];
     const eztv        = eztvResult.status         === 'fulfilled' ? eztvResult.value         : [];
-    const knight      = knightResult.status       === 'fulfilled' ? knightResult.value       : [];
+    const jackettio   = knightResult.status       === 'fulfilled' ? knightResult.value       : [];
     const bitSearch   = bitSearchResult.status    === 'fulfilled' ? bitSearchResult.value    : [];
     const comet       = cometResult.status        === 'fulfilled' ? cometResult.value        : [];
     const mediaFusion = mfResult.status           === 'fulfilled' ? mfResult.value           : [];
     const torrentio   = torrentioResult.status    === 'fulfilled' ? torrentioResult.value    : [];
 
-    console.log(`[Torrent] TPB=${apibay.length} YTS=${yts.length} EZTV=${eztv.length} Knight=${knight.length} BitSearch=${bitSearch.length} Comet=${comet.length} MF=${mediaFusion.length} Torrentio=${torrentio.length}`);
+    console.log(`[Torrent] TPB=${apibay.length} YTS=${yts.length} EZTV=${eztv.length} Jackettio=${jackettio.length} BitSearch=${bitSearch.length} Comet=${comet.length} MF=${mediaFusion.length} Torrentio=${torrentio.length}`);
 
     // Merge — Torrentio entries have fileIdx so they take priority
     const seen    = new Set();
     const merged  = [];
     const qRank   = { '4k': 0, '1080p': 1, '720p': 2, '480p': 3, 'unknown': 4 };
 
-    for (const src of [...apibay, ...yts, ...eztv, ...knight, ...bitSearch, ...comet, ...mediaFusion, ...torrentio]) {
+    for (const src of [...apibay, ...yts, ...eztv, ...jackettio, ...bitSearch, ...comet, ...mediaFusion, ...torrentio]) {
         const h = (src.infoHash || '').toLowerCase();
         if (!h || seen.has(h)) continue;
         seen.add(h);
@@ -181,7 +181,7 @@ async function fetchTorrentioSources(imdbId, type, season, episode) {
     
     try {
         const resp = await proxyAxios.get(url, { 
-            timeout: 12000, 
+            timeout: 3000, 
             headers: { ...BROWSER_HEADERS, 'Accept': 'application/json' } 
         });
         const streams = resp.data?.streams || [];
@@ -220,7 +220,7 @@ async function fetchYTSSources(imdbId, title) {
     const url = `https://yts.mx/api/v2/list_movies.json?query_term=${imdbId}`;
     try {
         console.log(`[YTS] Fetching: ${url}`);
-        const resp = await proxyAxios.get(url, { timeout: 8000, headers: BROWSER_HEADERS });
+        const resp = await proxyAxios.get(url, { timeout: 3000, headers: BROWSER_HEADERS });
         const movie = resp.data?.data?.movies?.[0];
         if (!movie || !movie.torrents) return [];
 
@@ -247,7 +247,7 @@ async function fetchEZTVSources(imdbId, title, season, episode) {
     const url = `https://eztv.re/api/get-torrents?imdb_id=${idNumeric}`;
     try {
         console.log(`[EZTV] Fetching: ${url}`);
-        const resp = await proxyAxios.get(url, { timeout: 10000, headers: BROWSER_HEADERS });
+        const resp = await proxyAxios.get(url, { timeout: 3000, headers: BROWSER_HEADERS });
         const torrents = resp.data?.torrents || [];
         
         const s = parseInt(season);
@@ -273,7 +273,7 @@ async function fetchEZTVSources(imdbId, title, season, episode) {
 // ── Internal: fetch from Comet ────────────────────────────────────────────────
 async function fetchCometSources(imdbId, type, season, episode) {
     if (!imdbId || imdbId === 'pending') return [];
-    const COMET_BASE = 'https://comet.strem.fun';
+    const COMET_BASE = 'https://comet.elfhosted.com';
     let idStr = imdbId;
     if (/^\d+$/.test(imdbId)) idStr = `tmdb:${imdbId}`;
 
@@ -286,7 +286,7 @@ async function fetchCometSources(imdbId, type, season, episode) {
     
     try {
         console.log(`[Comet] Fetching: ${url}`);
-        const resp = await proxyAxios.get(url, { timeout: 10000, headers: BROWSER_HEADERS });
+        const resp = await proxyAxios.get(url, { timeout: 3000, headers: BROWSER_HEADERS });
         const streams = resp.data?.streams || [];
         return streams.map(s => {
             const title = s.title || '';
@@ -311,10 +311,10 @@ async function fetchCometSources(imdbId, type, season, episode) {
     }
 }
 
-// ── Internal: fetch from KnightCrawler ────────────────────────────────────────
-async function fetchKnightCrawlerSources(imdbId, type, season, episode) {
+// ── Internal: fetch from Jackettio ────────────────────────────────────────
+async function fetchJackettioSources(imdbId, type, season, episode) {
     if (!imdbId || imdbId === 'pending') return [];
-    const BASE = 'https://knightcrawler.elfhosted.com';
+    const BASE = 'https://jackettio.elfhosted.com';
     let idStr = imdbId;
     if (/^\d+$/.test(imdbId)) idStr = `tmdb:${imdbId}`;
 
@@ -326,8 +326,8 @@ async function fetchKnightCrawlerSources(imdbId, type, season, episode) {
     }
     
     try {
-        console.log(`[KnightCrawler] Fetching: ${url}`);
-        const resp = await proxyAxios.get(url, { timeout: 10000, headers: BROWSER_HEADERS });
+        console.log(`[Jackettio] Fetching: ${url}`);
+        const resp = await proxyAxios.get(url, { timeout: 3000, headers: BROWSER_HEADERS });
         const streams = resp.data?.streams || [];
         return streams.map(s => {
             const title = s.title || '';
@@ -343,11 +343,11 @@ async function fetchKnightCrawlerSources(imdbId, type, season, episode) {
                 name: title.split('\n')[0],
                 infoHash: s.infoHash,
                 magnet: s.infoHash ? `magnet:?xt=urn:btih:${s.infoHash}` : null,
-                seeders, quality, fileIdx: s.fileIdx ?? null, source: 'knightcrawler',
+                seeders, quality, fileIdx: s.fileIdx ?? null, source: 'jackettio',
             };
         }).filter(s => s.infoHash);
     } catch (e) {
-        console.warn(`[KnightCrawler] Error: ${e.message}`);
+        console.warn(`[Jackettio] Error: ${e.message}`);
         return [];
     }
 }
@@ -370,7 +370,7 @@ async function fetchBitSearchSources(imdbId, type, season, episode) {
     
     try {
         console.log(`[BitSearch] Fetching: ${url}`);
-        const resp = await proxyAxios.get(url, { timeout: 10000, headers: BROWSER_HEADERS });
+        const resp = await proxyAxios.get(url, { timeout: 3000, headers: BROWSER_HEADERS });
         const streams = resp.data?.streams || [];
         return streams.map(s => {
             const title = s.title || '';
@@ -397,7 +397,7 @@ async function fetchBitSearchSources(imdbId, type, season, episode) {
 // ── Internal: fetch from MediaFusion ──────────────────────────────────────────
 async function fetchMediaFusionSources(imdbId, type, season, episode) {
     if (!imdbId || imdbId === 'pending') return [];
-    const MF_BASE = 'https://mediafusion.fun';
+    const MF_BASE = 'https://mediafusion.elfhosted.com';
     let idStr = imdbId;
     if (/^\d+$/.test(imdbId)) idStr = `tmdb:${imdbId}`;
 
@@ -410,7 +410,7 @@ async function fetchMediaFusionSources(imdbId, type, season, episode) {
 
     try {
         console.log(`[MediaFusion] Fetching: ${url}`);
-        const resp = await proxyAxios.get(url, { timeout: 10000, headers: BROWSER_HEADERS });
+        const resp = await proxyAxios.get(url, { timeout: 3000, headers: BROWSER_HEADERS });
         const streams = resp.data?.streams || [];
         return streams.map(s => {
             const title = s.description || s.title || '';
@@ -447,7 +447,7 @@ async function fetchApiBaySources(imdbId, type, season, episode, title = '') {
     console.log(`[APiBay] Fetching: https://apibay.org/q.php?q=${query}`);
     try {
         const resp = await proxyAxios.get(`https://apibay.org/q.php?q=${encodeURIComponent(query)}`, {
-            timeout: 8000,
+            timeout: 3000,
             headers: { ...BROWSER_HEADERS, 'Accept': 'application/json' },
         });
 
