@@ -1405,13 +1405,14 @@ app.get('/api/providers/health', async (req, res) => {
 // Rate limited: 30 req/min per IP (Torrentio has generous limits but we respect them)
 
 app.get('/api/torrent/sources', async (req, res) => {
-    const { imdbId, type = 'movie', season, episode, title, tmdbId } = req.query;
+    const { imdbId, type = 'movie', season, episode, title, tmdbId, nocache } = req.query;
 
     if (!imdbId && !title) return res.status(400).json({ error: 'imdbId or title required' });
 
     try {
+        const bypassRedis = nocache === 'true' ? null : redis;
         const [sources, subtitles] = await Promise.all([
-            getTorrentSources(imdbId, type, season, episode, title, redis),
+            getTorrentSources(imdbId, type, season, episode, title, bypassRedis),
             (tmdbId || imdbId) ? scrapeVdrkCaptions(tmdbId || imdbId, type, season, episode).catch(() => []) : Promise.resolve([])
         ]);
         res.json({ streams: sources, subtitles });
