@@ -462,13 +462,27 @@ async function fetchApiBaySources(imdbId, type, season, episode, title = '') {
 
         let filtered = results.filter(t => VIDEO_CATS.has(t.category) && parseInt(t.seeders) > 0);
 
-        // For TV, filter by season+episode pattern if possible
+        // For TV, filter by season+episode pattern or valid season pack
         if (type !== 'movie' && season && episode) {
             const s = String(season).padStart(2, '0');
             const e = String(episode).padStart(2, '0');
             const pat = new RegExp(`[Ss]0*${season}[Ee]0*${episode}|S${s}E${e}|${season}x${e}`, 'i');
-            const tv = filtered.filter(t => pat.test(t.name));
-            if (tv.length > 0) filtered = tv;
+            
+            const isWrongEp = (name) => {
+                const lc = name.toLowerCase();
+                const seRegex = /[sS](\d+)[eE](\d+)/g;
+                let match;
+                while ((match = seRegex.exec(lc)) !== null) {
+                    if (parseInt(match[1]) !== parseInt(season) || parseInt(match[2]) !== parseInt(episode)) return true;
+                }
+                const xRegex = /\b(\d+)x(\d+)\b/g;
+                while ((match = xRegex.exec(lc)) !== null) {
+                    if (parseInt(match[1]) !== parseInt(season) || parseInt(match[2]) !== parseInt(episode)) return true;
+                }
+                return false;
+            };
+
+            filtered = filtered.filter(t => pat.test(t.name) || (!isWrongEp(t.name) && (t.name.toLowerCase().includes('complete') || t.name.toLowerCase().includes('season'))));
         }
 
         const detectQuality = (name) => {
