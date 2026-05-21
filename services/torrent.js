@@ -441,7 +441,14 @@ async function fetchApiBaySources(imdbId, type, season, episode, title = '') {
     const TRACKERS = 'tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&tr=udp%3A%2F%2Fopen.tracker.cl%3A1337%2Fannounce';
 
     let query = imdbId;
-    if (!query || query === 'pending') query = title;
+    if (!query || query === 'pending') {
+        if (type !== 'movie' && season) {
+            const s = String(season).padStart(2, '0');
+            query = `${title} S${s}`;
+        } else {
+            query = title;
+        }
+    }
     if (!query) return [];
 
     console.log(`[APiBay] Fetching: https://apibay.org/q.php?q=${query}`);
