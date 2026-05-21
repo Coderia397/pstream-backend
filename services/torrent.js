@@ -492,6 +492,11 @@ async function fetchApiBaySources(imdbId, type, season, episode, title = '') {
             filtered = filtered.filter(t => pat.test(t.name) || (!isWrongEp(t.name) && (t.name.toLowerCase().includes('complete') || t.name.toLowerCase().includes('season'))));
         }
 
+        if (filtered.length === 0 && query === imdbId && title) {
+            console.log(`[APiBay] IMDB search yielded no matches for season/episode. Falling back to title search...`);
+            return fetchApiBaySources('', type, season, episode, title);
+        }
+
         const detectQuality = (name) => {
             const n = name.toLowerCase();
             if (/4k|2160p|uhd/.test(n)) return '4k';
