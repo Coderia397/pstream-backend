@@ -679,6 +679,10 @@ app.get('/proxy/stream', async (req, res) => {
             || /\/master\b/i.test(targetUrl)      // /master.m3u8 variants
             || /m3u/i.test(targetUrl);
         const fetchHeaders = extractSpoofedHeaders(req, targetUrl, targetUrl);
+        const clientRange = req.headers['range'] || req.headers['Range'];
+        if (clientRange) {
+            fetchHeaders['Range'] = clientRange;
+        }
 
         let finalFetchUrl = '';
         let edgeBasePath = '';
@@ -900,10 +904,19 @@ function handleResponse(response, targetUrl, isM3U8, edgeHost, fetchHeaders, res
         return res.send(filteredManifest);
     } else {
         // Binary segment stream (responseType was 'stream') or fallback text
+        res.status(response.status || 200);
         res.setHeader('Content-Type', response.headers['content-type'] || 'video/MP2T');
         if (response.headers['content-length']) {
             res.setHeader('Content-Length', response.headers['content-length']);
         }
+        if (response.headers['content-range']) {
+            res.setHeader('Content-Range', response.headers['content-range']);
+        }
+        if (response.headers['accept-ranges']) {
+            res.setHeader('Accept-Ranges', response.headers['accept-ranges']);
+        }
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
+        
         // response.data is a stream when responseType='stream', a string/buffer otherwise
         if (response.data && typeof response.data.pipe === 'function') {
             return response.data.pipe(res);
