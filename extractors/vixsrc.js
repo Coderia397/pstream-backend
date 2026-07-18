@@ -56,16 +56,23 @@ const SKIP_VALIDATION = process.env.VIXSRC_VALIDATE === '0';
  * configured — from a home IP vixsrc.to answers fine.
  */
 async function vixGet(url, extra = {}) {
-    const opts = { headers: HEADERS, timeout: 12000, validateStatus: () => true, ...extra };
+    const opts = { headers: HEADERS, timeout: 12000, ...extra };
+
+    // IMPORTANT: do not pass validateStatus here. proxyAxios implements its
+    // Tier-1 → Tier-2 (ScraperAPI) → Tier-3 fallback chain in a *response
+    // error* interceptor, so a non-2xx has to reject for the fallback to run.
+    // Suppressing the throw makes the residential proxy's 407 look like a
+    // success and the request never falls through to ScraperAPI.
     try {
-        const res = await proxyAxios.get(url, opts);
-        if (res.status < 400) return res;
-        // Proxy reached upstream but got refused — a direct attempt may still
-        // work when running outside the datacenter.
-        const direct = await gigaAxios.get(url, opts);
-        return direct.status < 400 ? direct : res;
+        return await proxyAxios.get(url, opts);
     } catch (proxyErr) {
-        return await gigaAxios.get(url, opts);
+        // Outside the datacenter (local/residential) vixsrc answers directly,
+        // so a direct attempt is worth one try before giving up.
+        try {
+            return await gigaAxios.get(url, opts);
+        } catch (_) {
+            throw proxyErr;
+        }
     }
 }
 
@@ -99,8 +106,12 @@ function parseMasterPlaylist(html = '') {
 async function validateSource(url) {
     if (SKIP_VALIDATION) return true;
     try {
-        const res = await vixGet(url, { headers: { ...HEADERS, Accept: '*/*' }, timeout: 10000 });
-        return res.status === 200 && String(res.data || '').trimStart().startsWith('#EXTM3U');
+        const res = await vixGet(url, {
+            headers: { ...HEADERS, Accept: '*/*' },
+            timeout: 10000,
+            responseType: 'text',
+        });
+        return String(res.data || '').trimStart().startsWith('#EXTM3U');
     } catch (_) {
         return false;
     }
@@ -117,11 +128,6 @@ export async function scrapeVixSrc(tmdbId, type, s, e) {
             headers: { ...HEADERS, Accept: 'application/json' },
             timeout: 10000,
         });
-
-        if (apiRes.status >= 400) {
-            console.warn(`[VixSrc] API ${apiRes.status} for ${apiPath}`);
-            return null;
-        }
 
         const apiData = typeof apiRes.data === 'string'
             ? (() => { try { return JSON.parse(apiRes.data); } catch { return null; } })()
@@ -140,11 +146,6 @@ export async function scrapeVixSrc(tmdbId, type, s, e) {
             timeout: 12000,
             responseType: 'text',
         });
-
-        if (pageRes.status >= 400) {
-            console.warn(`[VixSrc] Embed page ${pageRes.status}`);
-            return null;
-        }
 
         // ── Step 3: parse credentials ───────────────────────────────────────
         const master = parseMasterPlaylist(String(pageRes.data || ''));
