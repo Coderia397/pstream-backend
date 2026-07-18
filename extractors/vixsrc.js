@@ -50,6 +50,53 @@ const HEADERS = {
 // of possibly emitting a dead URL). Off by default — see validateSource().
 const SKIP_VALIDATION = process.env.VIXSRC_VALIDATE === '0';
 
+// ── Worker fast path ────────────────────────────────────────────────────────
+// Set VIXSRC_WORKER_URL to the deployed Cloudflare Worker (see worker/) and
+// the whole mint happens at the edge instead of here.
+//
+// This matters for latency, not just cost. Direct from this Space every
+// vixsrc.to request must traverse the residential-proxy → ScraperAPI chain,
+// where a single hop can cost 8s+; three sequential requests cannot fit inside
+// the resolver's ~13.5s budget, so VixSrc times out and returns nothing. The
+// Worker collapses those three into one fast call from an IP vixsrc accepts.
+const WORKER_URL = (process.env.VIXSRC_WORKER_URL || '').replace(/\/+$/, '');
+const WORKER_KEY = process.env.VIXSRC_WORKER_KEY || '';
+
+async function scrapeViaWorker(tmdbId, type, s, e) {
+    const params = new URLSearchParams({ tmdbId: String(tmdbId), type });
+    if (type !== 'movie') {
+        params.set('season', String(s || 1));
+        params.set('episode', String(e || 1));
+    }
+    if (WORKER_KEY) params.set('key', WORKER_KEY);
+
+    // gigaAxios (direct from this Space) is correct here: the Worker is ours
+    // and does not block datacenter IPs — only vixsrc.to does.
+    const { data } = await gigaAxios.get(`${WORKER_URL}/vixsrc?${params.toString()}`, {
+        timeout: 12000,
+        headers: { Accept: 'application/json' },
+    });
+
+    if (!data?.success || !data.url) {
+        console.log(`[VixSrc] Worker: ${data?.error || 'no url'}`);
+        return null;
+    }
+
+    console.log(`[VixSrc] ✅ via Worker → ${data.quality}`);
+    return {
+        success: true,
+        provider: 'VixSrc ⚡',
+        sources: [{
+            url: data.url,
+            quality: data.quality || '1080p',
+            isM3U8: true,
+            noProxy: true,
+            referer: `${BASE}/`,
+        }],
+        subtitles: [],
+    };
+}
+
 /**
  * vixsrc.to blocks datacenter IPs, so the proxy chain is the primary transport.
  * The direct fallback exists for local/residential runs where no proxy is
@@ -118,6 +165,16 @@ async function validateSource(url) {
 }
 
 export async function scrapeVixSrc(tmdbId, type, s, e) {
+    // Prefer the edge Worker when configured; fall back to the direct flow
+    // below so local/residential runs (and an unreachable Worker) still work.
+    if (WORKER_URL) {
+        try {
+            return await scrapeViaWorker(tmdbId, type, s, e);
+        } catch (err) {
+            console.warn(`[VixSrc] Worker unreachable (${err.message}) — falling back to direct`);
+        }
+    }
+
     try {
         const apiPath = type === 'movie'
             ? `/api/movie/${tmdbId}`
