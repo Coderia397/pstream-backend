@@ -1,70 +1,184 @@
 import { proxyAxios, gigaAxios } from '../utils/http.js';
 
 /**
- * VixSrc Extractor — Hardened v3 (2026-04-15)
- * 
- * VixSrc exposes a clean JSON API:
- *   GET /api/movie/{tmdbId}  → { src: "/embed/{id}?token=...&expires=..." }
- *   GET /api/tv/{tmdbId}     → { src: "/embed/{id}?token=...&expires=..." }
- * 
- * The embed page is an iframe served from vixcloud.co which contains the M3U8.
- * The /playlist/{id}?token=...&expires=... is the signed M3U8 playlist.
+ * VixSrc Extractor — v4 (2026-07-18)
+ *
+ * ── Why v3 returned unplayable URLs ─────────────────────────────────────────
+ * v3 read `token`/`expires` off the **embed** URL and concatenated them into a
+ * `/playlist/{id}` URL. Those are two different credentials:
+ *
+ *   embed token     — from /api/{type}/{id}, lives ~10 seconds, only valid for
+ *                     the /embed/ page itself.
+ *   playlist token  — published as `window.masterPlaylist.params` INSIDE the
+ *                     embed page, lives ~60 days, the only token /playlist/
+ *                     accepts.
+ *
+ * v3 never fetched the embed page, so it emitted a guessed URL that always
+ * 403s — while still reporting success:true. That made VixSrc win the resolver
+ * race with a dead link and starved the other providers of their turn.
+ *
+ * ── Correct flow ────────────────────────────────────────────────────────────
+ *   1. GET /api/{movie|tv}/...   → { src: "/embed/{id}?token=…&canPlayFHD=1" }
+ *   2. GET that embed page       → HTML containing window.masterPlaylist
+ *   3. Read params.token/expires + the playlist base URL from that page
+ *   4. Build {base}?token=…&expires=…[&h=1]
+ *
+ * ── Networking ──────────────────────────────────────────────────────────────
+ * vixsrc.to 403s datacenter IPs on EVERY path (homepage, /api, /playlist), so
+ * steps 1–3 must go through the residential proxy chain. Verified 2026-07-18.
+ * The video CDN (vix-content.net) does NOT block datacenter IPs.
+ *
+ * The emitted playlist serves `Access-Control-Allow-Origin: *` and needs no
+ * Referer, so it is returned with noProxy:true — hls.js streams it straight
+ * from the CDN. Video never touches our proxy, which is both faster and keeps
+ * segment traffic off the metered proxy.
+ *
+ * NOTE: playing direct means the server-side "English audio filter" in
+ * index.js never runs for these sources. VixSrc masters default to Italian
+ * audio (DEFAULT=YES), so the client must select the English track itself.
  */
+
 const BASE = 'https://vixsrc.to';
 
 const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept': 'application/json',
     'Referer': `${BASE}/`,
     'Origin': BASE,
 };
 
+// Skip the validation fetch (saves one proxy request per resolve, at the cost
+// of possibly emitting a dead URL). Off by default — see validateSource().
+const SKIP_VALIDATION = process.env.VIXSRC_VALIDATE === '0';
+
+/**
+ * vixsrc.to blocks datacenter IPs, so the proxy chain is the primary transport.
+ * The direct fallback exists for local/residential runs where no proxy is
+ * configured — from a home IP vixsrc.to answers fine.
+ */
+async function vixGet(url, extra = {}) {
+    const opts = { headers: HEADERS, timeout: 12000, validateStatus: () => true, ...extra };
+    try {
+        const res = await proxyAxios.get(url, opts);
+        if (res.status < 400) return res;
+        // Proxy reached upstream but got refused — a direct attempt may still
+        // work when running outside the datacenter.
+        const direct = await gigaAxios.get(url, opts);
+        return direct.status < 400 ? direct : res;
+    } catch (proxyErr) {
+        return await gigaAxios.get(url, opts);
+    }
+}
+
+/**
+ * Pull the playlist credentials out of the embed page.
+ * The page contains:
+ *   window.masterPlaylist = { params: { 'token': '…', 'expires': '…' }, url: '…' }
+ * `url` sits after the params object closes, so it is matched separately.
+ */
+function parseMasterPlaylist(html = '') {
+    const anchor = html.indexOf('masterPlaylist');
+    if (anchor === -1) return null;
+
+    // Scope the credential search to the masterPlaylist block so we can't
+    // accidentally match the embed URL's own token/expires query params.
+    const block = html.slice(anchor, anchor + 1500);
+
+    const token = block.match(/['"]token['"]\s*:\s*['"]([^'"]+)['"]/)?.[1];
+    const expires = block.match(/['"]expires['"]\s*:\s*['"]?(\d{9,})['"]?/)?.[1];
+    const url = block.match(/url:\s*['"]([^'"]*\/playlist\/[^'"]*)['"]/)?.[1]?.replace(/\\\//g, '/');
+
+    if (!token || !expires || !url) return null;
+    return { token, expires, url };
+}
+
+/**
+ * VixSrc answers 200 + #EXTM3U for a real title and 403 for one it lists but
+ * cannot serve. Without this check a dead URL still wins the resolver race and
+ * blocks every fallback provider, which is the failure mode v3 shipped.
+ */
+async function validateSource(url) {
+    if (SKIP_VALIDATION) return true;
+    try {
+        const res = await vixGet(url, { headers: { ...HEADERS, Accept: '*/*' }, timeout: 10000 });
+        return res.status === 200 && String(res.data || '').trimStart().startsWith('#EXTM3U');
+    } catch (_) {
+        return false;
+    }
+}
+
 export async function scrapeVixSrc(tmdbId, type, s, e) {
     try {
-        // Step 1: Get the signed embed src via JSON API
         const apiPath = type === 'movie'
             ? `/api/movie/${tmdbId}`
             : `/api/tv/${tmdbId}/${s}/${e}`;
 
-        console.log(`[VixSrc] Fetching API: ${BASE}${apiPath}`);
-        const { data: apiData } = await proxyAxios.get(`${BASE}${apiPath}`, { headers: HEADERS, timeout: 10000 });
+        // ── Step 1: signed embed src ────────────────────────────────────────
+        const apiRes = await vixGet(`${BASE}${apiPath}`, {
+            headers: { ...HEADERS, Accept: 'application/json' },
+            timeout: 10000,
+        });
+
+        if (apiRes.status >= 400) {
+            console.warn(`[VixSrc] API ${apiRes.status} for ${apiPath}`);
+            return null;
+        }
+
+        const apiData = typeof apiRes.data === 'string'
+            ? (() => { try { return JSON.parse(apiRes.data); } catch { return null; } })()
+            : apiRes.data;
 
         if (!apiData?.src) {
-            console.log('[VixSrc] No src in API response');
+            console.log(`[VixSrc] Not in catalog: ${apiPath}`);
             return null;
         }
 
-        // apiData.src is like "/embed/231752?token=...&expires=..."
-        const embedSrc = apiData.src.startsWith('http') ? apiData.src : `${BASE}${apiData.src}`;
-        const embedUrl = new URL(embedSrc);
+        const embedUrl = apiData.src.startsWith('http') ? apiData.src : `${BASE}${apiData.src}`;
 
-        // Extract token and expires from embed URL
-        const token = embedUrl.searchParams.get('token');
-        const expires = embedUrl.searchParams.get('expires');
-        const videoId = embedUrl.pathname.split('/').pop();
+        // ── Step 2: embed page (holds the real playlist credentials) ────────
+        const pageRes = await vixGet(embedUrl, {
+            headers: { ...HEADERS, Accept: 'text/html' },
+            timeout: 12000,
+            responseType: 'text',
+        });
 
-        if (!token || !expires || !videoId) {
-            console.log('[VixSrc] Missing token/expires/videoId from embed src');
+        if (pageRes.status >= 400) {
+            console.warn(`[VixSrc] Embed page ${pageRes.status}`);
             return null;
         }
 
-        // Step 2: Build the signed playlist URL directly
-        // VixSrc playlists are at: {BASE}/playlist/{videoId}?token={token}&expires={expires}&h=1
-        const playlistUrl = `${BASE}/playlist/${videoId}?token=${token}&expires=${expires}&h=1`;
+        // ── Step 3: parse credentials ───────────────────────────────────────
+        const master = parseMasterPlaylist(String(pageRes.data || ''));
+        if (!master) {
+            console.warn('[VixSrc] masterPlaylist block not found in embed page');
+            return null;
+        }
 
-        console.log(`[VixSrc] ✅ Resolved: ${playlistUrl.substring(0, 80)}...`);
+        // ── Step 4: build the playlist URL ──────────────────────────────────
+        // canPlayFHD gates the 1080p rendition behind &h=1.
+        const canPlayFHD = /canPlayFHD=1/.test(embedUrl);
+        const playlistUrl =
+            `${master.url}?token=${master.token}&expires=${master.expires}${canPlayFHD ? '&h=1' : ''}`;
+
+        if (!(await validateSource(playlistUrl))) {
+            console.warn(`[VixSrc] Playlist rejected for ${apiPath} — not serving a dead source`);
+            return null;
+        }
+
+        console.log(`[VixSrc] ✅ ${apiPath} → ${canPlayFHD ? '1080p' : '720p'}`);
+
         return {
             success: true,
             provider: 'VixSrc ⚡',
             sources: [{
                 url: playlistUrl,
-                quality: '1080p',
+                quality: canPlayFHD ? '1080p' : '720p',
                 isM3U8: true,
-                // noProxy removed: VixSrc CDN 403s browser XHRs because hls.js strips the Referer
-                // cross-origin. Route through /proxy/stream which sets Referer: https://vixsrc.to/
-                referer: `${BASE}/`
+                // CORS is open and no Referer is required, so the browser
+                // streams this straight from the CDN — no proxy hop.
+                noProxy: true,
+                referer: `${BASE}/`,
             }],
-            subtitles: []
+            subtitles: [],
         };
 
     } catch (error) {
