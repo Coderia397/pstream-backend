@@ -2,26 +2,28 @@
  * P-Stream Giga Engine Resolver v21.0.0
  *
  * PROVIDERS (extractor fallback pipeline — fires only if AllDebrid fails):
- *   Vyla      — aggregator, 14+ sources.   ~2-3s
- *   VaPlayer  — fast clean JSON API.        ~2.4s
- *   CineSu    — direct 1080p HLS.           ~1-2s
- *   VixSrc    — clean, no auth.             ~3-4s
- *   VidSrc.ru — 3-hop HTML chain.           ~7.7s
- *   LookMovie — title-search based.         ~7.4s
+ *   VixSrc    — 2-step token mint, 1080p HLS.  ~0.8s
+ *   LookMovie — title-search based.            ~2s
  *
- * REMOVED: VidZee (HF-blocked CDN), SmashyStream, MoviesAPI,
+ * REMOVED 2026-07-18: Vyla (service dead), CineSu + VaPlayer (APIs moved),
+ *          VidSrc.ru (stream token is now injected by player JS at runtime,
+ *          so the page ships a `__TOKEN__` placeholder and there is nothing
+ *          left to scrape). All four verified failing from a residential IP,
+ *          so this is upstream rot, not our egress being blocked.
+ * REMOVED earlier: VidZee (HF-blocked CDN), SmashyStream, MoviesAPI,
  *          PrimeSrc, VidSrc.me (duplicate), ApiBay (→ torrent.js).
+ *
+ * NOTE ON ADDING PROVIDERS: the current generation (vidlink.pro, 111movies,
+ * vidfast) are client-side SPAs that encrypt the tmdbId and mint stream tokens
+ * in JS — vidlink's API path is an AES-encrypted id. They cannot be scraped
+ * with plain HTTP; each needs its own reverse-engineering of that crypto.
  *
  * POLICY: No embeds. Raw M3U8 or direct MP4/MKV only.
  * All providers race in parallel with a 15s hard timeout.
  * After first success, a short grace window collects additional winners.
  */
 
-import { scrapeVyla }                      from './extractors/vyla.js';
-import { extractVaPlayer }                 from './extractors/vaplayer.js';
-import { scrapeCineSu }                    from './extractors/cinesu.js';
 import { scrapeVixSrc }                    from './extractors/vixsrc.js';
-import { scrapeVidSrc as scrapeVidSrcRu }  from './extractors/vidsrcru.js';
 import { scrapeLookMovie }                 from './extractors/lookmovie.js';
 import { scrapeVdrkCaptions }             from './extractors/subs_vdrk.js';
 import { filterByHealth }                  from './services/providerHealth.js';
@@ -225,12 +227,18 @@ function collectExtractorResults(extractors, timeoutMs) {
 export async function resolveStreaming(tmdbId, type, season, episode, title, year) {
     console.log(`[Resolver] ${title || tmdbId} (${type}${type === 'tv' ? ` S${season}E${episode}` : ''})`);
 
+    // Retired 2026-07-18 — all four verified dead or unscrapable from a
+    // residential IP, so the failure is theirs, not our egress:
+    //   Vyla      vyla-api.pages.dev 404s on every path including root.
+    //   CineSu    site up, but /v1/stream/master/* is gone (404).
+    //   VaPlayer  streamdata.vaplayer.ru/api.php is gone (404).
+    //   VidSrc.ru chain still resolves, but the page now ships a literal
+    //             `?token=__TOKEN__` placeholder that the player's JS fills in
+    //             at runtime — nothing to scrape without executing JS.
+    // They were racing on every request and never returning a source; VidSrc.ru
+    // in particular burned the full timeout, dragging the whole race with it.
     const allProviders = [
-        { id: 'vyla',      name: 'Vyla',      run: () => scrapeVyla(tmdbId, type, season, episode) },
-        { id: 'vaplayer',  name: 'VaPlayer',  run: () => extractVaPlayer({ tmdbId, type, season, episode }) },
-        { id: 'cinesu',    name: 'CineSu',    run: () => scrapeCineSu(tmdbId, type, season, episode) },
         { id: 'vixsrc',    name: 'VixSrc',    run: () => scrapeVixSrc(tmdbId, type, season, episode) },
-        { id: 'vidsrc_ru', name: 'VidSrc.ru', run: () => scrapeVidSrcRu(tmdbId, type, season, episode) },
         { id: 'lookmovie', name: 'LookMovie', run: () => title
             ? scrapeLookMovie(tmdbId, type === 'movie' ? 'movie' : 'show', season, episode, title, year)
             : Promise.resolve({ success: false, _skipReason: 'no title' }) },
@@ -273,12 +281,10 @@ export async function resolveStreaming(tmdbId, type, season, episode, title, yea
 // ── Diagnostic endpoint ──────────────────────────────────────────────────────
 
 export async function diagnoseProviders(tmdbId, type, season = '1', episode = '1', title = '', year = '') {
+    // Mirrors the live roster in resolveStreaming — see the retirement note
+    // there for why the other four were removed.
     const providers = [
-        { id: 'vyla',      name: 'Vyla',      run: () => scrapeVyla(tmdbId, type, season, episode) },
-        { id: 'vaplayer',  name: 'VaPlayer',  run: () => extractVaPlayer({ tmdbId, type, season, episode }) },
-        { id: 'cinesu',    name: 'CineSu',    run: () => scrapeCineSu(tmdbId, type, season, episode) },
         { id: 'vixsrc',    name: 'VixSrc',    run: () => scrapeVixSrc(tmdbId, type, season, episode) },
-        { id: 'vidsrc_ru', name: 'VidSrc.ru', run: () => scrapeVidSrcRu(tmdbId, type, season, episode) },
         { id: 'lookmovie', name: 'LookMovie', run: () => scrapeLookMovie(tmdbId, type === 'movie' ? 'movie' : 'show', season, episode, title, year) },
     ];
 

@@ -220,18 +220,15 @@ app.get('/api/ping', (req, res) => {
 app.get('/api/debug-providers', async (req, res) => {
     const { tmdbId = '637', type = 'movie', season = '1', episode = '1' } = req.query;
 
+    // Only the live roster — see resolver.js for why the others were retired.
+    // This route previously imported ./extractors/vidzee.js, which does not
+    // exist, so every call threw before reaching a single provider.
     const [
-        { extractVaPlayer },
-        { scrapeVidZee },
-        { scrapeVidSrc: scrapeVidSrcRu },
+        { scrapeVixSrc },
         { scrapeLookMovie },
-        { scrapeVyla },
     ] = await Promise.all([
-        import('./extractors/vaplayer.js'),
-        import('./extractors/vidzee.js'),
-        import('./extractors/vidsrcru.js'),
+        import('./extractors/vixsrc.js'),
         import('./extractors/lookmovie.js'),
-        import('./extractors/vyla.js'),
     ]);
 
     const test = async (name, fn) => {
@@ -262,11 +259,8 @@ app.get('/api/debug-providers', async (req, res) => {
     };
 
     const results = await Promise.allSettled([
-        test('Vyla Aggregator', () => scrapeVyla(tmdbId, type, season, episode)),
-        test('VaPlayer',        () => extractVaPlayer({ tmdbId, type, season, episode })),
-        test('VidZee',         () => scrapeVidZee(tmdbId, type, season, episode)),
-        test('VidSrc.ru',      () => scrapeVidSrcRu(tmdbId, type, season, episode)),
-        test('LookMovie',      () => scrapeLookMovie(tmdbId, type === 'movie' ? 'movie' : 'show', season, episode, req.query.title || '', req.query.year || '')),
+        test('VixSrc',    () => scrapeVixSrc(tmdbId, type, season, episode)),
+        test('LookMovie', () => scrapeLookMovie(tmdbId, type === 'movie' ? 'movie' : 'show', season, episode, req.query.title || '', req.query.year || '')),
     ]);
 
     res.json({ tmdbId, type, policy: 'no-embed', results: results.map(r => r.value || { error: r.reason?.message }) });
