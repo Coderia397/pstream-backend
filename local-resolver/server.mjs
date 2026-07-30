@@ -154,14 +154,52 @@ function cacheSet(key, data) {
     if (cache.size > MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
 }
 
+// ── Rate limiting ────────────────────────────────────────────────────────────
+// Every resolve goes out over this machine's ONE IP. Anyone who finds this URL
+// could otherwise hammer it — burning mobile data and, worse, getting that
+// single IP rate-limited or banned by the providers, which takes the whole site
+// down. Cache hits are free; only real provider work is counted.
+const RATE_MAX = 30;              // provider-hitting requests…
+const RATE_WINDOW_MS = 60 * 1000; // …per IP per minute
+const rate = new Map();
+
+function rateLimited(ip) {
+    const now = Date.now();
+    const e = rate.get(ip);
+    if (!e || now > e.reset) { rate.set(ip, { n: 1, reset: now + RATE_WINDOW_MS }); return false; }
+    e.n++;
+    return e.n > RATE_MAX;
+}
+// Keep the map from growing without bound.
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, e] of rate) if (now > e.reset) rate.delete(ip);
+}, RATE_WINDOW_MS).unref?.();
+
 // ── Server ───────────────────────────────────────────────────────────────────
-const CORS = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-};
+// Only our own front-ends may call this from a browser. This does not stop
+// scripted abuse (curl ignores CORS) — that's what the rate limit is for — but
+// it does stop other websites using this resolver as free infrastructure.
+const ALLOWED_ORIGINS = [
+    'https://pstream.watch',
+    'https://www.pstream.watch',
+    'http://localhost:5173',
+    'http://localhost:5199',
+    'http://localhost:4173',
+];
+function corsFor(req) {
+    const origin = req.headers.origin;
+    const ok = !origin || ALLOWED_ORIGINS.includes(origin) || /^https:\/\/[a-z0-9-]+\.pages\.dev$/.test(origin);
+    return {
+        'Access-Control-Allow-Origin': ok ? (origin || '*') : 'https://pstream.watch',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Vary': 'Origin',
+    };
+}
 
 http.createServer(async (req, res) => {
+    const CORS = corsFor(req);
     const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', ...CORS }); res.end(JSON.stringify(obj)); };
 
     if (req.method === 'OPTIONS') { res.writeHead(204, CORS); return res.end(); }
@@ -171,25 +209,49 @@ http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/stream') {
         const q = url.searchParams;
-        const tmdbId = q.get('tmdbId');
         const type = q.get('type') === 'tv' ? 'tv' : 'movie';
-        if (!tmdbId) return send(400, { success: false, error: 'tmdbId required' });
 
-        const season = q.get('season') || '1', episode = q.get('episode') || '1';
+        // Validate before use: these are interpolated straight into provider URL
+        // paths (/api/tv/{id}/{season}/{episode}), so anything but digits could
+        // reshape the request path — and unbounded values would let a caller
+        // flood the cache with junk keys and evict real entries.
+        const tmdbId = q.get('tmdbId');
+        if (!tmdbId || !/^\d{1,12}$/.test(tmdbId)) {
+            return send(400, { success: false, error: 'tmdbId must be numeric' });
+        }
+
+        const seasonRaw = q.get('season') || '1', episodeRaw = q.get('episode') || '1';
+        if (!/^\d{1,4}$/.test(seasonRaw) || !/^\d{1,5}$/.test(episodeRaw)) {
+            return send(400, { success: false, error: 'season/episode must be numeric' });
+        }
+        const season = seasonRaw, episode = episodeRaw;
+        // Titles only feed a search query; cap the length so one caller can't
+        // push huge strings through the provider or into our logs.
+        const title = (q.get('title') || '').slice(0, 200);
+        const year = (q.get('year') || '').slice(0, 4);
         const cacheKey = `${type}:${tmdbId}:${season}:${episode}`;
 
-        // Serve a hot title from memory — no provider request at all.
+        // Serve a hot title from memory — no provider request at all. Cache hits
+        // are deliberately NOT rate-limited: they cost us nothing.
         const hit = cacheGet(cacheKey);
         if (hit) {
             res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'HIT', ...CORS });
             return res.end(JSON.stringify(hit));
         }
 
+        // Past this point we'd hit a provider over our single IP — so meter it.
+        const ip = (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '?')
+            .toString().split(',')[0].trim();
+        if (rateLimited(ip)) {
+            console.warn(`[resolve] rate-limited ${ip}`);
+            res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...CORS });
+            return res.end(JSON.stringify({ success: false, error: 'Too many requests — please slow down.' }));
+        }
+
         const started = Date.now();
         try {
             const out = await resolve({
-                tmdbId, type, season, episode,
-                title: q.get('title') || '', year: q.get('year') || '',
+                tmdbId, type, season, episode, title, year,
             });
             if (out.success) cacheSet(cacheKey, out); // never cache a miss — a title may appear later
             console.log(`[resolve] ${type}/${tmdbId} -> ${out.success ? out.provider : 'MISS'} (${Date.now() - started}ms)`);
