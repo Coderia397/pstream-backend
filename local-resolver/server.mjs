@@ -114,19 +114,70 @@ async function resolveLookMovie(type, tmdbId, season, episode, title, year) {
     };
 }
 
-// ── Resolver: race both, first real answer wins ──────────────────────────────
+// ── Provider health ──────────────────────────────────────────────────────────
+// Tracks which providers are actually delivering so the preferred one can be
+// ordered first. Kept in memory only — it's a hint for ordering, not state we
+// need to survive a restart.
+const health = new Map(); // providerId -> { ok, fail, lastMs }
+
+function recordHealth(providerId, ok, ms) {
+    const h = health.get(providerId) || { ok: 0, fail: 0, lastMs: 0 };
+    if (ok) h.ok++; else h.fail++;
+    h.lastMs = ms;
+    health.set(providerId, h);
+}
+
+function successRate(providerId) {
+    const h = health.get(providerId);
+    if (!h || (h.ok + h.fail) < 5) return 0.5; // too few samples — stay neutral
+    return h.ok / (h.ok + h.fail);
+}
+
+// ── Resolver: race providers, return EVERY working source ────────────────────
+// Both providers are queried in parallel for latency, and every one that
+// answers is returned — not just the winner. The player already cycles through
+// `sources` when a URL turns out dead at playback time, so handing it a spare
+// avoids a full re-resolve (and therefore a second round of provider requests
+// over our single IP). Previously the loser's perfectly good URL was discarded.
 async function resolve({ tmdbId, type, season, episode, title, year }) {
-    const providers = [
-        resolveVixSrc(type, tmdbId, season, episode).catch(() => null),
-        resolveLookMovie(type, tmdbId, season, episode, title, year).catch(() => null),
-    ];
-    const results = (await Promise.all(providers)).filter(Boolean);
+    const run = async (id, fn) => {
+        const t0 = Date.now();
+        try {
+            const r = await fn();
+            recordHealth(id, !!r, Date.now() - t0);
+            return r;
+        } catch {
+            recordHealth(id, false, Date.now() - t0);
+            return null;
+        }
+    };
+
+    const results = (await Promise.all([
+        run('vixsrc', () => resolveVixSrc(type, tmdbId, season, episode)),
+        run('lookmovie', () => resolveLookMovie(type, tmdbId, season, episode, title, year)),
+    ])).filter(Boolean);
+
     if (!results.length) return { success: false, error: 'No stream found. All providers are currently unavailable.' };
 
-    // VixSrc first when present — cleaner 1080p HLS — else whatever answered.
-    const winner = results.find(r => r.providerId === 'vixsrc') || results[0];
-    const subtitles = results.flatMap(r => r.subtitles || []);
-    return { success: true, provider: winner.provider, providerId: winner.providerId, sources: winner.sources, subtitles };
+    // Order: VixSrc first (cleaner 1080p HLS with explicit variants), but demote
+    // it if its recent success rate has fallen behind LookMovie's.
+    const ranked = results.sort((a, b) => {
+        const base = (a.providerId === 'vixsrc' ? -1 : 0) - (b.providerId === 'vixsrc' ? -1 : 0);
+        const byHealth = successRate(b.providerId) - successRate(a.providerId);
+        return Math.abs(byHealth) > 0.3 ? byHealth : base;
+    });
+
+    const sources = ranked.flatMap(r => r.sources || []);
+    const subtitles = ranked.flatMap(r => r.subtitles || []);
+    const winner = ranked[0];
+    return {
+        success: true,
+        provider: winner.provider,
+        providerId: winner.providerId,
+        // Every working source, best first — the player falls back through these.
+        sources,
+        subtitles,
+    };
 }
 
 // ── YouTube trailer search (keyless) ─────────────────────────────────────────
