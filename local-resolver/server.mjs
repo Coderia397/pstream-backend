@@ -129,6 +129,45 @@ async function resolve({ tmdbId, type, season, episode, title, year }) {
     return { success: true, provider: winner.provider, providerId: winner.providerId, sources: winner.sources, subtitles };
 }
 
+// ── YouTube trailer search (keyless) ─────────────────────────────────────────
+// The frontend used to call the YouTube Data API directly, which meant shipping
+// API keys in the browser bundle — where anyone could read them (Vite inlines
+// any VITE_* value). Doing the search here instead means no key ever reaches a
+// visitor. We scrape YouTube's own search page rather than using the Data API,
+// so there is no key to leak in the first place and no quota to exhaust.
+//
+// Returns title + channel alongside the id because the frontend scores
+// candidates on those to pick the best-matching trailer.
+async function youtubeSearch(query, maxResults = 5) {
+    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIQAQ%3D%3D`;
+    const { text } = await getText(url, {
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }, 12000);
+
+    // Search results are embedded as ytInitialData JSON inside the page.
+    const out = [];
+    const seen = new Set();
+    const re = /"videoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})"(.*?)"ownerText":\{"runs":\[\{"text":"(.*?)"/g;
+    let m;
+    while ((m = re.exec(text)) !== null && out.length < maxResults) {
+        const videoId = m[1];
+        if (seen.has(videoId)) continue;
+        seen.add(videoId);
+        // Title lives in the chunk between the id and ownerText.
+        const titleMatch = /"title":\{"runs":\[\{"text":"(.*?)"/.exec(m[2]);
+        const decode = (s) => {
+            try { return JSON.parse(`"${s}"`); } catch { return s; }
+        };
+        out.push({
+            videoId,
+            title: titleMatch ? decode(titleMatch[1]) : '',
+            channelTitle: decode(m[3]),
+        });
+    }
+    return out;
+}
+
 // ── In-memory cache ──────────────────────────────────────────────────────────
 // Every user's resolution goes out over this one machine's single IP, so that
 // IP is the rate-limit bottleneck (not each visitor's network — the browser's
@@ -162,6 +201,11 @@ function cacheSet(key, data) {
 const RATE_MAX = 30;              // provider-hitting requests…
 const RATE_WINDOW_MS = 60 * 1000; // …per IP per minute
 const rate = new Map();
+
+function clientIp(req) {
+    return (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '?')
+        .toString().split(',')[0].trim();
+}
 
 function rateLimited(ip) {
     const now = Date.now();
@@ -207,6 +251,38 @@ http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     if (url.pathname === '/api/ping' || url.pathname === '/') return send(200, { ok: true, service: 'local-resolver' });
 
+    // Trailer search — keeps YouTube API keys out of the browser entirely.
+    if (url.pathname === '/api/youtube/search') {
+        const q = (url.searchParams.get('q') || '').slice(0, 200).trim();
+        if (!q) return send(400, { results: [], error: 'q required' });
+        const maxResults = Math.min(Math.max(parseInt(url.searchParams.get('maxResults') || '5', 10) || 5, 1), 10);
+
+        const key = `yt:${q}:${maxResults}`;
+        const hit = cacheGet(key);
+        if (hit) {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'HIT', ...CORS });
+            return res.end(JSON.stringify(hit));
+        }
+
+        const ip = clientIp(req);
+        if (rateLimited(ip)) {
+            res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...CORS });
+            return res.end(JSON.stringify({ results: [], error: 'Too many requests' }));
+        }
+
+        try {
+            const results = await youtubeSearch(q, maxResults);
+            const payload = { results };
+            if (results.length) cacheSet(key, payload);
+            console.log(`[yt] "${q.slice(0, 40)}" -> ${results.length} result(s)`);
+            res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'MISS', ...CORS });
+            return res.end(JSON.stringify(payload));
+        } catch (e) {
+            console.warn('[yt] search failed:', e.message);
+            return send(200, { results: [], error: e.message });
+        }
+    }
+
     if (url.pathname === '/api/stream') {
         const q = url.searchParams;
         const type = q.get('type') === 'tv' ? 'tv' : 'movie';
@@ -240,8 +316,7 @@ http.createServer(async (req, res) => {
         }
 
         // Past this point we'd hit a provider over our single IP — so meter it.
-        const ip = (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '?')
-            .toString().split(',')[0].trim();
+        const ip = clientIp(req);
         if (rateLimited(ip)) {
             console.warn(`[resolve] rate-limited ${ip}`);
             res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...CORS });
