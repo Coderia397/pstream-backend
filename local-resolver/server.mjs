@@ -244,6 +244,28 @@ function cacheSet(key, data) {
     if (cache.size > MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
 }
 
+// ── SubDL subtitle search ────────────────────────────────────────────────────
+// Same reasoning as the YouTube endpoint: the frontend used to call SubDL
+// directly with VITE_SUBDL_API_KEY, which Vite inlines into the browser bundle
+// where anyone can read it. Only the SEARCH needs the key — the subtitle files
+// SubDL returns are plain public URLs the browser can still fetch itself, so we
+// proxy just this one call and the key never leaves this machine.
+//
+// Set SUBDL_API_KEY (no VITE_ prefix) in the environment to enable.
+const SUBDL_KEY = process.env.SUBDL_API_KEY || '';
+
+async function subdlSearch({ tmdbId, type, season, episode, langs }) {
+    if (!SUBDL_KEY) return { subtitles: [], error: 'SUBDL_API_KEY not configured' };
+    let url = `https://api.subdl.com/api/v1/subtitles?api_key=${encodeURIComponent(SUBDL_KEY)}`
+        + `&tmdb_id=${encodeURIComponent(tmdbId)}&type=${type === 'tv' ? 'tv' : 'movie'}`
+        + `&subs_per_page=30&language=${encodeURIComponent(langs)}`;
+    if (type === 'tv') url += `&season_number=${encodeURIComponent(season)}&episode_number=${encodeURIComponent(episode)}`;
+
+    const { ok, status, json } = await getJson(url, {}, 10000);
+    if (!ok) return { subtitles: [], error: `SubDL HTTP ${status}` };
+    return { subtitles: Array.isArray(json?.subtitles) ? json.subtitles : [] };
+}
+
 // ── Rate limiting ────────────────────────────────────────────────────────────
 // Every resolve goes out over this machine's ONE IP. Anyone who finds this URL
 // could otherwise hammer it — burning mobile data and, worse, getting that
@@ -331,6 +353,43 @@ http.createServer(async (req, res) => {
         } catch (e) {
             console.warn('[yt] search failed:', e.message);
             return send(200, { results: [], error: e.message });
+        }
+    }
+
+    // Subtitle search — keeps the SubDL API key out of the browser.
+    if (url.pathname === '/api/subtitles/subdl') {
+        const q = url.searchParams;
+        const tmdbId = q.get('tmdbId');
+        if (!tmdbId || !/^\d{1,12}$/.test(tmdbId)) return send(400, { subtitles: [], error: 'tmdbId must be numeric' });
+        const type = q.get('type') === 'tv' ? 'tv' : 'movie';
+        const season = (q.get('season') || '1').replace(/\D/g, '').slice(0, 4) || '1';
+        const episode = (q.get('episode') || '1').replace(/\D/g, '').slice(0, 5) || '1';
+        // Comma-separated ISO codes; strip anything that isn't a code so the
+        // value can't be used to reshape the upstream query.
+        const langs = (q.get('langs') || 'en').split(',').map(s => s.trim().toLowerCase())
+            .filter(s => /^[a-z]{2,3}$/.test(s)).slice(0, 10).join(',') || 'en';
+
+        const key = `subdl:${type}:${tmdbId}:${season}:${episode}:${langs}`;
+        const hit = cacheGet(key);
+        if (hit) {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'HIT', ...CORS });
+            return res.end(JSON.stringify(hit));
+        }
+
+        if (rateLimited(clientIp(req))) {
+            res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...CORS });
+            return res.end(JSON.stringify({ subtitles: [], error: 'Too many requests' }));
+        }
+
+        try {
+            const out = await subdlSearch({ tmdbId, type, season, episode, langs });
+            if (out.subtitles.length) cacheSet(key, out);
+            console.log(`[subdl] ${type}/${tmdbId} -> ${out.subtitles.length} result(s)`);
+            res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'MISS', ...CORS });
+            return res.end(JSON.stringify(out));
+        } catch (e) {
+            console.warn('[subdl] failed:', e.message);
+            return send(200, { subtitles: [], error: e.message });
         }
     }
 
