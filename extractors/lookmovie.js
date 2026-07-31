@@ -66,11 +66,12 @@ export async function scrapeLookMovie(id, type, season, episode, title, year) {
 
         return {
             success: true,
-            provider: 'LookMovie 🎬 (Direct)',
+            provider: 'LookMovie 🎬',
             sources: [{
                 url: videoUrl,
                 quality: 'auto',
-                isM3U8: true
+                isM3U8: true,
+                noProxy: false,
             }],
             subtitles
         };

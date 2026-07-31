@@ -21,6 +21,7 @@
  */
 
 import http from 'http';
+import { Readable } from 'stream';
 import { execSync } from 'child_process';
 import { scrapeWatchFlix }                 from '../extractors/watchflix.js';
 import { scrapeBingr }                     from '../extractors/bingr.js';
@@ -120,10 +121,33 @@ async function resolveLookMovie(type, tmdbId, season, episode, title, year) {
 
     return {
         provider: 'LookMovie 🎬', providerId: 'lookmovie',
-        // noProxy: LookMovie's stream host serves ACAO:*, so it plays direct.
-        sources: [{ url, quality: 'auto', isM3U8: true, noProxy: true }],
+        // noProxy: false — LookMovie stream URLs are IP-bound to this machine's IP,
+        // so visitor browsers must route requests through /proxy/stream.
+        sources: [{ url, quality: 'auto', isM3U8: true, noProxy: false }],
         subtitles,
     };
+}
+
+// ── M3U8 Manifest Rewriter for Proxy ──────────────────────────────────────────
+function rewriteProxyManifest(text, baseUrl, headersParam = '') {
+    const lines = text.split(/\r?\n/);
+    return lines.map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return '';
+        if (trimmed.startsWith('#')) {
+            if (/URI=/i.test(trimmed)) {
+                return trimmed.replace(/URI=(['"]?)(.*?)\1/i, (match, quote, p2) => {
+                    let absoluteUrl = p2;
+                    try { absoluteUrl = new URL(p2, baseUrl).href; } catch (e) { return match; }
+                    return `URI=${quote}/proxy/stream?url=${encodeURIComponent(absoluteUrl)}${headersParam}${quote}`;
+                });
+            }
+            return trimmed;
+        }
+        let absoluteUrl = trimmed;
+        try { absoluteUrl = new URL(trimmed, baseUrl).href; } catch (e) { return trimmed; }
+        return `/proxy/stream?url=${encodeURIComponent(absoluteUrl)}${headersParam}`;
+    }).join('\n');
 }
 
 // ── Provider health ──────────────────────────────────────────────────────────
@@ -341,6 +365,79 @@ http.createServer(async (req, res) => {
 
     const url = new URL(req.url, 'http://x');
     if (url.pathname === '/api/ping' || url.pathname === '/') return send(200, { ok: true, service: 'local-resolver' });
+
+    // ── Stream proxy: proxies M3U8 playlists & segments through this machine's IP ──
+    if (url.pathname === '/proxy/stream') {
+        const targetUrlRaw = url.searchParams.get('url');
+        if (!targetUrlRaw) return send(400, { success: false, error: 'url parameter required' });
+
+        let targetUrl = targetUrlRaw;
+        try { targetUrl = decodeURIComponent(targetUrlRaw); } catch {}
+
+        let customHeaders = {};
+        const headersParam = url.searchParams.get('headers');
+        if (headersParam) {
+            try { customHeaders = JSON.parse(headersParam); } catch {}
+        }
+
+        const fetchHeaders = {
+            'User-Agent': UA,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            ...customHeaders,
+        };
+
+        try {
+            const upstream = await fetch(targetUrl, {
+                headers: fetchHeaders,
+                signal: AbortSignal.timeout(15000),
+            });
+
+            if (!upstream.ok && upstream.status !== 206) {
+                res.writeHead(upstream.status, { 'Content-Type': 'application/json', ...CORS });
+                return res.end(JSON.stringify({ error: `Upstream returned status ${upstream.status}` }));
+            }
+
+            const contentType = upstream.headers.get('content-type') || '';
+            const isManifest = contentType.includes('mpegurl') || contentType.includes('m3u8') || targetUrl.includes('.m3u8');
+
+            if (isManifest) {
+                const text = await upstream.text();
+                if (text.startsWith('#EXTM3U')) {
+                    const encodedHeadersParam = headersParam ? `&headers=${encodeURIComponent(headersParam)}` : '';
+                    const rewritten = rewriteProxyManifest(text, targetUrl, encodedHeadersParam);
+                    res.writeHead(200, {
+                        'Content-Type': 'application/vnd.apple.mpegurl',
+                        'Cache-Control': 'no-cache',
+                        ...CORS,
+                    });
+                    return res.end(rewritten);
+                }
+            }
+
+            // Binary video segment/subtitle stream
+            const resHeaders = {
+                'Content-Type': contentType || 'application/octet-stream',
+                'Cache-Control': 'public, max-age=3600',
+                ...CORS,
+            };
+            const contentLength = upstream.headers.get('content-length');
+            if (contentLength) resHeaders['Content-Length'] = contentLength;
+            const contentRange = upstream.headers.get('content-range');
+            if (contentRange) resHeaders['Content-Range'] = contentRange;
+
+            res.writeHead(upstream.status, resHeaders);
+            if (upstream.body) {
+                Readable.fromWeb(upstream.body).pipe(res);
+            } else {
+                res.end();
+            }
+            return;
+        } catch (e) {
+            console.warn('[proxy/stream] error:', e.message);
+            return send(500, { error: `Proxy failed: ${e.message}` });
+        }
+    }
 
     // Trailer search — keeps YouTube API keys out of the browser entirely.
     if (url.pathname === '/api/youtube/search') {
