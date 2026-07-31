@@ -26,12 +26,19 @@ const SUSPEND_TTL = 30 * 60; // 30 minutes
 const HEALTH_TTL = 24 * 60 * 60; // 24 hours
 
 const PROVIDER_ALIASES = [
-    { id: 'vaplayer', test: /vaplayer/i },
-    { id: 'vidzee', test: /vidzee/i },
-    { id: 'vidsrc_ru', test: /vidsrc\.?ru|vsembed/i },
+    { id: 'vixsrc', test: /vixsrc/i },
     { id: 'lookmovie', test: /lookmovie/i },
-    { id: 'primesrc', test: /primesrc/i },
-    { id: 'vidsrcme', test: /vidsrcme|vidsrc-me/i },
+    { id: 'watchflix', test: /watchflix/i },
+    { id: 'bingr', test: /bingr/i },
+    { id: 'fireflix', test: /fireflix/i },
+    { id: 'oneshows', test: /1shows|oneshows/i },
+    { id: 'cinemaos', test: /cinemaos/i },
+    { id: 'aurorascreen', test: /aurorascreen/i },
+    { id: 'miruro', test: /miruro/i },
+    { id: 'bstsrs', test: /bstsrs/i },
+    { id: 'dramacool', test: /dramacool/i },
+    { id: 'moviebox', test: /moviebox/i },
+    { id: 'nontongo', test: /nontongo/i },
 ];
 
 export function canonicalProviderId(name) {

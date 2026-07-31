@@ -21,6 +21,17 @@
  */
 
 import http from 'http';
+import { scrapeWatchFlix }                 from '../extractors/watchflix.js';
+import { scrapeBingr }                     from '../extractors/bingr.js';
+import { scrapeFireFlix }                  from '../extractors/fireflix.js';
+import { scrape1Shows }                    from '../extractors/oneshows.js';
+import { scrapeCinemaOS }                  from '../extractors/cinemaos.js';
+import { scrapeAuroraScreen }              from '../extractors/aurorascreen.js';
+import { scrapeMiruro }                    from '../extractors/miruro.js';
+import { scrapeBSTSrs }                    from '../extractors/bstsrs.js';
+import { scrapeDramaCool }                 from '../extractors/dramacool.js';
+import { scrapeMovieBox }                  from '../extractors/moviebox.js';
+import { scrapeNontonGo }                  from '../extractors/nontongo.js';
 
 const PORT = process.env.PORT || 8790;
 
@@ -153,19 +164,25 @@ async function resolve({ tmdbId, type, season, episode, title, year }) {
     };
 
     const results = (await Promise.all([
-        run('vixsrc', () => resolveVixSrc(type, tmdbId, season, episode)),
-        run('lookmovie', () => resolveLookMovie(type, tmdbId, season, episode, title, year)),
+        run('vixsrc',       () => resolveVixSrc(type, tmdbId, season, episode)),
+        run('lookmovie',    () => resolveLookMovie(type, tmdbId, season, episode, title, year)),
+        run('watchflix',    () => scrapeWatchFlix(tmdbId, type, season, episode)),
+        run('bingr',        () => scrapeBingr(tmdbId, type, season, episode)),
+        run('fireflix',     () => scrapeFireFlix(tmdbId, type, season, episode)),
+        run('oneshows',     () => scrape1Shows(tmdbId, type, season, episode)),
+        run('cinemaos',     () => scrapeCinemaOS(tmdbId, type, season, episode)),
+        run('aurorascreen', () => scrapeAuroraScreen(tmdbId, type, season, episode)),
+        run('miruro',       () => scrapeMiruro(tmdbId, type, season, episode)),
+        run('bstsrs',       () => scrapeBSTSrs(tmdbId, type, season, episode)),
+        run('dramacool',    () => scrapeDramaCool(tmdbId, type, season, episode)),
+        run('moviebox',     () => scrapeMovieBox(title, year)),
+        run('nontongo',     () => scrapeNontonGo(tmdbId, type, season, episode)),
     ])).filter(Boolean);
 
     if (!results.length) return { success: false, error: 'No stream found. All providers are currently unavailable.' };
 
-    // Order: VixSrc first (cleaner 1080p HLS with explicit variants), but demote
-    // it if its recent success rate has fallen behind LookMovie's.
-    const ranked = results.sort((a, b) => {
-        const base = (a.providerId === 'vixsrc' ? -1 : 0) - (b.providerId === 'vixsrc' ? -1 : 0);
-        const byHealth = successRate(b.providerId) - successRate(a.providerId);
-        return Math.abs(byHealth) > 0.3 ? byHealth : base;
-    });
+    // Unbiased ordering: treat all working providers equally based on response timing
+    const ranked = [...results];
 
     const sources = ranked.flatMap(r => r.sources || []);
     const subtitles = ranked.flatMap(r => r.subtitles || []);

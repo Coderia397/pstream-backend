@@ -25,6 +25,17 @@
 
 import { scrapeVixSrc }                    from './extractors/vixsrc.js';
 import { scrapeLookMovie }                 from './extractors/lookmovie.js';
+import { scrapeWatchFlix }                 from './extractors/watchflix.js';
+import { scrapeBingr }                     from './extractors/bingr.js';
+import { scrapeFireFlix }                  from './extractors/fireflix.js';
+import { scrape1Shows }                    from './extractors/oneshows.js';
+import { scrapeCinemaOS }                  from './extractors/cinemaos.js';
+import { scrapeAuroraScreen }              from './extractors/aurorascreen.js';
+import { scrapeMiruro }                    from './extractors/miruro.js';
+import { scrapeBSTSrs }                    from './extractors/bstsrs.js';
+import { scrapeDramaCool }                 from './extractors/dramacool.js';
+import { scrapeMovieBox }                  from './extractors/moviebox.js';
+import { scrapeNontonGo }                  from './extractors/nontongo.js';
 import { scrapeVdrkCaptions }             from './extractors/subs_vdrk.js';
 import { filterByHealth }                  from './services/providerHealth.js';
 
@@ -238,10 +249,21 @@ export async function resolveStreaming(tmdbId, type, season, episode, title, yea
     // They were racing on every request and never returning a source; VidSrc.ru
     // in particular burned the full timeout, dragging the whole race with it.
     const allProviders = [
-        { id: 'vixsrc',    name: 'VixSrc',    run: () => scrapeVixSrc(tmdbId, type, season, episode) },
-        { id: 'lookmovie', name: 'LookMovie', run: () => title
+        { id: 'vixsrc',       name: 'VixSrc',       run: () => scrapeVixSrc(tmdbId, type, season, episode) },
+        { id: 'lookmovie',    name: 'LookMovie',    run: () => title
             ? scrapeLookMovie(tmdbId, type === 'movie' ? 'movie' : 'show', season, episode, title, year)
             : Promise.resolve({ success: false, _skipReason: 'no title' }) },
+        { id: 'watchflix',    name: 'WatchFlix',    run: () => scrapeWatchFlix(tmdbId, type, season, episode) },
+        { id: 'bingr',        name: 'Bingr',        run: () => scrapeBingr(tmdbId, type, season, episode) },
+        { id: 'fireflix',     name: 'FireFlix',     run: () => scrapeFireFlix(tmdbId, type, season, episode) },
+        { id: 'oneshows',     name: '1Shows',       run: () => scrape1Shows(tmdbId, type, season, episode) },
+        { id: 'cinemaos',     name: 'CinemaOS',     run: () => scrapeCinemaOS(tmdbId, type, season, episode) },
+        { id: 'aurorascreen', name: 'AuroraScreen', run: () => scrapeAuroraScreen(tmdbId, type, season, episode) },
+        { id: 'miruro',       name: 'Miruro',       run: () => scrapeMiruro(tmdbId, type, season, episode) },
+        { id: 'bstsrs',       name: 'BSTSrs',       run: () => scrapeBSTSrs(tmdbId, type, season, episode) },
+        { id: 'dramacool',    name: 'DramaCool',    run: () => scrapeDramaCool(tmdbId, type, season, episode) },
+        { id: 'moviebox',     name: 'MovieBox',     run: () => scrapeMovieBox(title, year) },
+        { id: 'nontongo',     name: 'NontonGo',     run: () => scrapeNontonGo(tmdbId, type, season, episode) },
     ];
 
     const healthy = await filterByHealth(allProviders);
@@ -284,8 +306,19 @@ export async function diagnoseProviders(tmdbId, type, season = '1', episode = '1
     // Mirrors the live roster in resolveStreaming — see the retirement note
     // there for why the other four were removed.
     const providers = [
-        { id: 'vixsrc',    name: 'VixSrc',    run: () => scrapeVixSrc(tmdbId, type, season, episode) },
-        { id: 'lookmovie', name: 'LookMovie', run: () => scrapeLookMovie(tmdbId, type === 'movie' ? 'movie' : 'show', season, episode, title, year) },
+        { id: 'vixsrc',       name: 'VixSrc',       run: () => scrapeVixSrc(tmdbId, type, season, episode) },
+        { id: 'lookmovie',    name: 'LookMovie',    run: () => scrapeLookMovie(tmdbId, type === 'movie' ? 'movie' : 'show', season, episode, title, year) },
+        { id: 'watchflix',    name: 'WatchFlix',    run: () => scrapeWatchFlix(tmdbId, type, season, episode) },
+        { id: 'bingr',        name: 'Bingr',        run: () => scrapeBingr(tmdbId, type, season, episode) },
+        { id: 'fireflix',     name: 'FireFlix',     run: () => scrapeFireFlix(tmdbId, type, season, episode) },
+        { id: 'oneshows',     name: '1Shows',       run: () => scrape1Shows(tmdbId, type, season, episode) },
+        { id: 'cinemaos',     name: 'CinemaOS',     run: () => scrapeCinemaOS(tmdbId, type, season, episode) },
+        { id: 'aurorascreen', name: 'AuroraScreen', run: () => scrapeAuroraScreen(tmdbId, type, season, episode) },
+        { id: 'miruro',       name: 'Miruro',       run: () => scrapeMiruro(tmdbId, type, season, episode) },
+        { id: 'bstsrs',       name: 'BSTSrs',       run: () => scrapeBSTSrs(tmdbId, type, season, episode) },
+        { id: 'dramacool',    name: 'DramaCool',    run: () => scrapeDramaCool(tmdbId, type, season, episode) },
+        { id: 'moviebox',     name: 'MovieBox',     run: () => scrapeMovieBox(title, year) },
+        { id: 'nontongo',     name: 'NontonGo',     run: () => scrapeNontonGo(tmdbId, type, season, episode) },
     ];
 
     const startAll = Date.now();
