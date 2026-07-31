@@ -21,6 +21,7 @@
  */
 
 import http from 'http';
+import { execSync } from 'child_process';
 import { scrapeWatchFlix }                 from '../extractors/watchflix.js';
 import { scrapeBingr }                     from '../extractors/bingr.js';
 import { scrapeFireFlix }                  from '../extractors/fireflix.js';
@@ -462,6 +463,34 @@ http.createServer(async (req, res) => {
         } catch (e) {
             console.error('[resolve] error', e.message);
             return send(200, { success: false, error: e.message });
+        }
+    }
+
+    // ── Remote deploy: git pull + restart ──────────────────────────────────────
+    if (url.pathname === '/api/deploy' && req.method === 'POST') {
+        const secret = process.env.DEPLOY_SECRET || 'pstream-deploy-2026';
+        const provided = url.searchParams.get('secret') || '';
+        if (provided !== secret) {
+            return send(403, { success: false, error: 'Invalid deploy secret' });
+        }
+
+        try {
+            const cwd = new URL('..', import.meta.url).pathname;
+            const pullOutput = execSync('git pull origin main', { cwd, timeout: 30000 }).toString();
+            console.log('[deploy] git pull:', pullOutput.trim());
+
+            res.writeHead(200, { 'Content-Type': 'application/json', ...CORS });
+            res.end(JSON.stringify({ success: true, pull: pullOutput.trim(), restarting: true }));
+
+            // Give the response time to flush, then restart
+            setTimeout(() => {
+                console.log('[deploy] Restarting process...');
+                process.exit(0); // Termux auto-restart / pm2 / systemd will bring it back
+            }, 500);
+            return;
+        } catch (e) {
+            console.error('[deploy] failed:', e.message);
+            return send(500, { success: false, error: e.message });
         }
     }
 
