@@ -17,7 +17,11 @@ export async function scrapeMovieBox(title, year) {
 
   try {
     const res = await axios.get(searchUrl, { headers: HEADERS, httpsAgent: insecureAgent, timeout: 8000 });
-    const html = String(res.data);
+    if (!res || !res.data) {
+      return { success: false, error: 'Empty response data' };
+    }
+
+    const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
 
     // 1. Look for direct m3u8 or mp4 stream links
     const m3u8Match = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
