@@ -468,9 +468,13 @@ http.createServer(async (req, res) => {
 
     // ── Remote deploy: git pull + restart ──────────────────────────────────────
     if (url.pathname === '/api/deploy' && req.method === 'POST') {
-        const secret = process.env.DEPLOY_SECRET || 'pstream-deploy-2026';
-        const provided = url.searchParams.get('secret') || '';
-        if (provided !== secret) {
+        const secret = process.env.DEPLOY_SECRET;
+        if (!secret) {
+            return send(404, { success: false, error: 'not_found' });
+        }
+
+        const provided = req.headers['x-deploy-secret'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '') || '';
+        if (!provided || provided !== secret) {
             return send(403, { success: false, error: 'Invalid deploy secret' });
         }
 
