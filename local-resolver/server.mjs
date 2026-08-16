@@ -288,7 +288,6 @@ function cacheSet(key, data) {
 
 // ── SubDL subtitle search ────────────────────────────────────────────────────
 // Same reasoning as the YouTube endpoint: the frontend used to call SubDL
-// directly with VITE_SUBDL_API_KEY, which Vite inlines into the browser bundle
 // where anyone can read it. Only the SEARCH needs the key — the subtitle files
 // SubDL returns are plain public URLs the browser can still fetch itself, so we
 // proxy just this one call and the key never leaves this machine.
@@ -441,6 +440,11 @@ http.createServer(async (req, res) => {
 
     // Trailer search — keeps YouTube API keys out of the browser entirely.
     if (url.pathname === '/api/youtube/search') {
+        const ip = clientIp(req);
+        if (rateLimited(ip)) return send(429, { error: 'Rate limit exceeded' });
+        const origin = req.headers.origin || req.headers.referer || '';
+        if (!origin.includes('pstream.watch') && !origin.includes('localhost') && !origin.includes('.pages.dev')) return send(403, { error: 'Forbidden' });
+
         const q = (url.searchParams.get('q') || '').slice(0, 200).trim();
         if (!q) return send(400, { results: [], error: 'q required' });
         const maxResults = Math.min(Math.max(parseInt(url.searchParams.get('maxResults') || '5', 10) || 5, 1), 10);
@@ -473,6 +477,11 @@ http.createServer(async (req, res) => {
 
     // Subtitle search — keeps the SubDL API key out of the browser.
     if (url.pathname === '/api/subtitles/subdl') {
+        const ip = clientIp(req);
+        if (rateLimited(ip)) return send(429, { error: 'Rate limit exceeded' });
+        const origin = req.headers.origin || req.headers.referer || '';
+        if (!origin.includes('pstream.watch') && !origin.includes('localhost') && !origin.includes('.pages.dev')) return send(403, { error: 'Forbidden' });
+
         const q = url.searchParams;
         const tmdbId = q.get('tmdbId');
         if (!tmdbId || !/^\d{1,12}$/.test(tmdbId)) return send(400, { subtitles: [], error: 'tmdbId must be numeric' });

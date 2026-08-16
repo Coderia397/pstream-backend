@@ -1011,6 +1011,11 @@ const YT_SEARCH_CIRCUIT_MS = 60 * 1000;
 // YouTube Search Proxy — no API key required fallback for trailer search.
 // Returns only video IDs to keep payload small and stable.
 app.get('/api/youtube/search', async (req, res) => {
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    if (rateLimit(`yt_${clientIp}`, 30, 60000)) return res.status(429).json({ error: 'Rate limit exceeded' });
+    const origin = req.headers.origin || req.headers.referer || '';
+    if (!origin.includes('pstream.watch') && !origin.includes('localhost') && !origin.includes('.pages.dev')) return res.status(403).json({ error: 'Forbidden' });
+
     const rawQ = String(req.query.q || '').trim();
     const maxResultsRaw = Number(req.query.maxResults || 5);
     const maxResults = Math.min(Math.max(maxResultsRaw || 5, 1), 10);
@@ -1112,6 +1117,42 @@ app.get('/api/youtube/search', async (req, res) => {
 
     ytSearchCircuitOpenUntil = Date.now() + YT_SEARCH_CIRCUIT_MS;
     return res.json(putCache({ videoIds: [], source: 'none' }, YT_SEARCH_EMPTY_TTL_MS));
+});
+
+// SubDL Proxy
+app.get('/api/subtitles/subdl', async (req, res) => {
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    if (rateLimit(`sub_${clientIp}`, 30, 60000)) return res.status(429).json({ error: 'Rate limit exceeded' });
+    const origin = req.headers.origin || req.headers.referer || '';
+    if (!origin.includes('pstream.watch') && !origin.includes('localhost') && !origin.includes('.pages.dev')) return res.status(403).json({ error: 'Forbidden' });
+
+    const { tmdbId, type, langs, season, episode } = req.query;
+    if (!tmdbId || !type || !langs) {
+        return res.status(400).json({ error: 'tmdbId, type, and langs are required' });
+    }
+    
+    const apiKey = process.env.SUBDL_API_KEY;
+    if (!apiKey) {
+        return res.status(500).json({ error: 'SUBDL_API_KEY not configured on server' });
+    }
+
+    try {
+        let url = `https://api.subdl.com/api/v1/subtitles?api_key=${apiKey}&tmdb_id=${tmdbId}&type=${type}&subs_per_page=30&languages=${langs}`;
+        if (type === 'tv' && season != null) {
+            url += `&season_number=${season}`;
+            if (episode != null) url += `&episode_number=${episode}`;
+        }
+        
+        const response = await axios.get(url, {
+            headers: { 'User-Agent': getRandomUA(), 'Accept': 'application/json' },
+            timeout: 10000
+        });
+        
+        return res.json(response.data);
+    } catch (e) {
+        console.warn(`[SubDL Proxy] fetch failed: ${e?.response?.status || e.message}`);
+        return res.status(502).json({ error: 'Failed to fetch from SubDL' });
+    }
 });
 
 // --- GIGA API ENDPOINTS ---
