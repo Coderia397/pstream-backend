@@ -456,12 +456,6 @@ http.createServer(async (req, res) => {
             return res.end(JSON.stringify(hit));
         }
 
-        const ip = clientIp(req);
-        if (rateLimited(ip)) {
-            res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...CORS });
-            return res.end(JSON.stringify({ results: [], error: 'Too many requests' }));
-        }
-
         try {
             const results = await youtubeSearch(q, maxResults);
             const payload = { results };
