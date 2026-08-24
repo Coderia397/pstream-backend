@@ -1,0 +1,64 @@
+name: Deploy to phone resolver
+
+# Nudges the phone to pull immediately after a push, so a change is live in
+# seconds rather than waiting for the next poll.
+#
+# This is the fast path, not the reliable one. The device is a phone on
+# whatever network it happens to be on, so this request will sometimes fail —
+# that is expected and not a build failure. A poller on the device pulls main
+# every two minutes regardless, which is what actually guarantees delivery
+# once the phone is reachable again.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # A burst of pushes only needs the last one to land.
+  group: deploy-resolver
+  cancel-in-progress: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Trigger pull + restart on the device
+        env:
+          DEPLOY_SECRET: ${{ secrets.DEPLOY_SECRET }}
+        run: |
+          if [ -z "$DEPLOY_SECRET" ]; then
+            echo "::warning::DEPLOY_SECRET is not set — skipping. The device poller will pick this up within 2 minutes."
+            exit 0
+          fi
+
+          # --max-time keeps a dead tunnel from holding the runner open.
+          code=$(curl -sS -o /tmp/deploy.out -w '%{http_code}' \
+                   --max-time 45 \
+                   -X POST https://resolver.pstream.watch/api/deploy \
+                   -H "X-Deploy-Secret: $DEPLOY_SECRET" || echo 000)
+
+          echo "HTTP $code"
+          cat /tmp/deploy.out 2>/dev/null || true
+          echo
+
+          case "$code" in
+            200)
+              echo "Resolver pulled and is restarting."
+              ;;
+            000|502|503|530)
+              echo "::warning::Device unreachable (HTTP $code). The 2-minute poller will deliver this commit when the phone is back online."
+              ;;
+            403)
+              echo "::error::Deploy secret rejected. The value in GitHub Secrets does not match DEPLOY_SECRET on the device."
+              exit 1
+              ;;
+            404)
+              echo "::error::Endpoint reported not_found, which means DEPLOY_SECRET is unset on the device."
+              exit 1
+              ;;
+            *)
+              echo "::warning::Unexpected status $code; leaving it to the poller."
+              ;;
+          esac
