@@ -9,12 +9,9 @@
     "dev": "nodemon index.js"
   },
   "dependencies": {
-    "@noble/hashes": "^1.8.0",
     "@supabase/supabase-js": "^2.100.1",
     "axios": "^1.14.0",
-    "cheerio": "1.0.0-rc.12",
     "cors": "^2.8.6",
-    "crypto-js": "^4.2.0",
     "dotenv": "^16.6.1",
     "express": "^4.22.1",
     "http-cookie-agent": "^6.0.7",
@@ -22,12 +19,8 @@
     "https-proxy-agent": "^8.0.0",
     "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.3",
-    "puppeteer": "^22.15.0",
-    "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "tough-cookie": "^5.0.0",
     "tweetnacl": "^1.0.3",
-    "unpacker": "^1.0.1",
     "webtorrent": "^2.8.5",
     "yt-dlp-exec": "^1.0.2"
   },
