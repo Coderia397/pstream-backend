@@ -1,0 +1,10 @@
+# This repo is archived — the source lives at the js-final tag. These rules
+# exist so a working copy that still has the old tree checked out (node_modules
+# and a real .env) doesn't show thousands of untracked files, and so a secret
+# can't be committed here by accident.
+
+node_modules/
+.env
+*.log
+
+.DS_Store
