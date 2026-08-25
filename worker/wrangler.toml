@@ -1,9 +1,0 @@
-name = "pstream-vixsrc"
-main = "src/index.js"
-compatibility_date = "2026-07-18"
-
-# Optional: protect the endpoint so it isn't free minting capacity for anyone
-# who finds the URL. Set it with:
-#   npx wrangler secret put SHARED_SECRET
-# then pass ?key=... (or an Authorization: Bearer header) on every request.
-# Leave it unset and the Worker is open.
